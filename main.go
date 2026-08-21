@@ -116,8 +116,12 @@ func cmdServe(args []string) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	tailerDone := make(chan struct{})
 	if !*noTail {
-		go runTailers(ctx, st, c, true)
+		go func() {
+			defer close(tailerDone)
+			runTailers(ctx, st, c, true)
+		}()
 	}
 
 	srv := &server.Server{
@@ -152,6 +156,11 @@ func cmdServe(args []string) error {
 	defer sc()
 	httpSrv.Shutdown(shutdownCtx)
 	cancel()
+	select {
+	case <-tailerDone:
+	case <-time.After(10 * time.Second):
+		log.Printf("timed out waiting for tailers to stop")
+	}
 	return st.Close()
 }
 
