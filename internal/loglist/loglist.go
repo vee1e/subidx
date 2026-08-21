@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"time"
 )
@@ -89,11 +90,13 @@ func FetchAll(client *http.Client) ([]Log, error) {
 	urls := []string{ChromeList, ChromeAllList, AppleList}
 	seen := make(map[string]*Log)
 	var order []string
+	var fetched int
 	for _, u := range urls {
 		list, err := fetchOne(client, u)
 		if err != nil {
 			continue
 		}
+		fetched++
 		for i := range list.Operators {
 			for j := range list.Operators[i].Logs {
 				lg := &list.Operators[i].Logs[j]
@@ -120,6 +123,12 @@ func FetchAll(client *http.Client) ([]Log, error) {
 	out := make([]Log, 0, len(order))
 	for _, id := range order {
 		out = append(out, *seen[id])
+	}
+	if fetched == 0 {
+		return nil, fmt.Errorf("all %d log list sources failed", len(urls))
+	}
+	if fetched < len(urls) {
+		log.Printf("loglist: %d of %d sources failed", len(urls)-fetched, len(urls))
 	}
 	return out, nil
 }
