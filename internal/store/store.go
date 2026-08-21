@@ -53,9 +53,15 @@ type Store struct {
 }
 
 type ingestOp struct {
-	rec   *Record
-	logID string
-	wm    int64
+	rec     *Record
+	logID   string
+	wm      int64
+	recount chan recountResult
+}
+
+type recountResult struct {
+	total uint64
+	err   error
 }
 
 func Open(dir string) (*Store, error) {
@@ -123,11 +129,16 @@ func (s *Store) ingestLoop() {
 				}
 				return
 			}
-			if op.rec == nil {
+			if op.rec == nil && op.recount == nil {
 				if cur, ok := s.wmHigh[op.logID]; !ok || op.wm > cur {
 					s.wmHigh[op.logID] = op.wm
 					s.pendingWM[op.logID] = op.wm
 				}
+				continue
+			}
+			if op.recount != nil {
+				total, err := s.recountInLoop(flush, batch)
+				op.recount <- recountResult{total: total, err: err}
 				continue
 			}
 			if err := s.apply(batch, *op.rec); err != nil {
@@ -223,26 +234,14 @@ func (s *Store) pendingCount(apex string) uint64 {
 }
 
 func (s *Store) Ingest(r Record) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
-		return errStoreClosed
-	}
-	s.ch <- ingestOp{rec: &r}
-	return nil
+	return s.sendOp(ingestOp{rec: &r})
 }
 
 // AdvanceWatermark records a new high-water mark for a log. It is persisted in
 // the same atomic batch as the records ingested before it, so a crash can
 // never persist the marker without the data it covers (or vice versa).
 func (s *Store) AdvanceWatermark(logID string, n int64) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
-		return errStoreClosed
-	}
-	s.ch <- ingestOp{logID: logID, wm: n}
-	return nil
+	return s.sendOp(ingestOp{logID: logID, wm: n})
 }
 
 // DefaultScanLimit caps how many results Scan will buffer for a single
@@ -365,7 +364,38 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
+// Recount rebuilds per-apex counters and the total from a full record scan.
+// It runs inside the ingest loop so counter state is never touched from two
+// goroutines; the pebble file lock keeps other processes out meanwhile.
 func (s *Store) Recount() (uint64, error) {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return 0, errStoreClosed
+	}
+	s.mu.Unlock()
+	ch := make(chan recountResult, 1)
+	if err := s.sendOp(ingestOp{recount: ch}); err != nil {
+		return 0, err
+	}
+	r := <-ch
+	return r.total, r.err
+}
+
+func (s *Store) sendOp(op ingestOp) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return errStoreClosed
+	}
+	s.ch <- op
+	return nil
+}
+
+func (s *Store) recountInLoop(flush func() error, batch *pebble.Batch) (uint64, error) {
+	if err := flush(); err != nil {
+		return 0, err
+	}
 	lo := []byte{0x00}
 	hi := []byte{pfxCount}
 	it, err := s.db.NewIter(&pebble.IterOptions{LowerBound: lo, UpperBound: hi})
@@ -386,40 +416,40 @@ func (s *Store) Recount() (uint64, error) {
 		if sep < 0 {
 			continue
 		}
-		apex := string(k[:sep])
-		counts[apex]++
+		counts[string(k[:sep])]++
 		total++
 	}
 	if err := it.Close(); err != nil {
 		return 0, err
 	}
-	batch := s.db.NewBatch()
-	defer batch.Close()
+	rcBatch := s.db.NewBatch()
+	defer rcBatch.Close()
 	for apex, n := range counts {
 		var buf [8]byte
 		binary.BigEndian.PutUint64(buf[:], n)
-		if err := batch.Set(countKey(apex), buf[:], nil); err != nil {
+		if err := rcBatch.Set(countKey(apex), buf[:], nil); err != nil {
 			return 0, err
 		}
-		if batch.Count() >= 4096 {
-			if err := batch.Commit(pebble.Sync); err != nil {
+		if rcBatch.Count() >= 4096 {
+			if err := rcBatch.Commit(pebble.Sync); err != nil {
 				return 0, err
 			}
-			batch.Reset()
+			rcBatch.Reset()
 		}
 	}
 	var totBuf [8]byte
 	binary.BigEndian.PutUint64(totBuf[:], total)
-	if err := batch.Set(totalKey(), totBuf[:], nil); err != nil {
+	if err := rcBatch.Set(totalKey(), totBuf[:], nil); err != nil {
 		return 0, err
 	}
-	if err := batch.Commit(pebble.Sync); err != nil {
+	if err := rcBatch.Commit(pebble.Sync); err != nil {
 		return 0, err
 	}
-	s.mu.Lock()
 	s.totalBase = total
 	s.pendingTotal = 0
-	s.mu.Unlock()
+	s.pendingCounts = make(map[string]uint64)
+	s.pendingRecords = make(map[string]*recState)
+	batch.Reset()
 	return total, nil
 }
 

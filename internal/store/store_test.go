@@ -63,3 +63,39 @@ func TestWatermarkAtomicWithRecords(t *testing.T) {
 		t.Fatalf("watermark rewound: %d, want 100", wm)
 	}
 }
+
+func TestRecount(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	for _, r := range []Record{
+		{Apex: "example.com", Sub: "a.example.com", FirstSeen: 1, Source: 1},
+		{Apex: "example.com", Sub: "b.example.com", FirstSeen: 2, Source: 1},
+		{Apex: "other.com", Sub: "x.other.com", FirstSeen: 3, Source: 1},
+	} {
+		if err := st.Ingest(r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	time.Sleep(100 * time.Millisecond)
+	total, err := st.Recount()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 3 {
+		t.Fatalf("recount total = %d, want 3", total)
+	}
+	if n, _ := st.Count("example.com"); n != 2 {
+		t.Errorf("count(example.com) = %d, want 2", n)
+	}
+	// Ingestion must keep working with correct counters after a recount.
+	if err := st.Ingest(Record{Apex: "example.com", Sub: "c.example.com", FirstSeen: 4, Source: 1}); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if got, _ := st.Total(); got != 4 {
+		t.Errorf("total after recount+ingest = %d, want 4", got)
+	}
+}
