@@ -1,6 +1,21 @@
 # subidx
 
-subidx is your own copy of crt.name. It watches public Certificate Transparency logs (public records of every HTTPS certificate issued), collects every website name it sees, and lets you search them by domain.
+subidx is a self-hosted passive subdomain enumeration tool for recon and attack-surface mapping. It tails public Certificate Transparency logs (public records of every HTTPS certificate issued), indexes every hostname it sees, and serves them through a search API you control. Think crt.name, but the data lives on your machine and answers to nobody else's rate limits.
+
+## Why not just use subfinder?
+
+Tools like [subfinder](https://github.com/projectdiscovery/subfinder) query other people's services (crt.sh, Shodan, VirusTotal...) at run time. That works, but you inherit their quotas, captchas, downtime, and blind spots, and every run starts from zero. subidx takes a different position: pull from the source yourself, once, and own the index.
+
+What that buys you in a recon workflow:
+
+- **Continuous coverage.** The tailer runs 24/7 with crash-safe resume. A certificate issued thirty seconds ago is already searchable. Point-in-time tools only see what third parties had indexed when you ran them.
+- **First-seen timelines.** Every name carries the earliest date it appeared in any watched log (`&dates=1`). Diff over time to catch new subdomains on targets between engagements.
+- **No keys, no quotas.** Zero API keys, zero third-party terms of service. Your only dependencies are the log lists themselves.
+- **Verified provenance.** Each log's signing key is pinned, signed tree heads are verified, and entries failing verification are never ingested.
+- **Historical drains.** Years of history from retired and rejected logs can be backfilled locally — terabytes if you want all of it.
+- **A hosted API, not just a CLI.** Pipe results straight into your existing tooling: `curl "http://localhost:8099/v1/search?apex=target.com"`.
+
+Honest limits: CT logs only contain hostnames that were issued a certificate. Names that exist purely in DNS records or web mentions are invisible here, which is why subidx complements rather than replaces broader-source tools.
 
 Status: the live pipeline works end to end. A four minute run against the live firehose collected about 470,000 names from 21 logs.
 
