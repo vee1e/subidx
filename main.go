@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -100,6 +101,7 @@ func cmdServe(args []string) error {
 	noTail := fs.Bool("no-tail", false, "disable CT tailers")
 	rateLimit := fs.Int64("rate-limit", 1000, "requests per rolling 24h per IP")
 	maxResults := fs.Int("max-results", store.DefaultScanLimit, "max results buffered per search query")
+	allowedHosts := fs.String("allowed-hosts", "", "comma-separated Host values to accept (default: localhost, 127.0.0.1, ::1)")
 	trustedHops := fs.Int("trusted-proxy-hops", 0, "trusted proxies in front (0 = ignore X-Forwarded-For)")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -124,12 +126,20 @@ func cmdServe(args []string) error {
 		}()
 	}
 
+	var hosts []string
+	for _, h := range strings.Split(*allowedHosts, ",") {
+		if h = strings.TrimSpace(h); h != "" {
+			hosts = append(hosts, h)
+		}
+	}
+
 	srv := &server.Server{
-		Store:       st,
-		Limiter:     server.NewLimiter(*rateLimit, 24*time.Hour),
-		TrustedHops: *trustedHops,
-		RateLimit:   *rateLimit,
-		MaxResults:  *maxResults,
+		Store:        st,
+		Limiter:      server.NewLimiter(*rateLimit, 24*time.Hour),
+		TrustedHops:  *trustedHops,
+		RateLimit:    *rateLimit,
+		MaxResults:   *maxResults,
+		AllowedHosts: hosts,
 		ReadyFn: func() bool {
 			t, err := st.Total()
 			return err == nil && t >= 0

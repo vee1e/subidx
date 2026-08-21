@@ -52,6 +52,7 @@ func waitIngest(t *testing.T, st *store.Store) {
 func do(t *testing.T, s *Server, method, target string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(method, target, nil)
+	req.Host = "localhost"
 	rec := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rec, req)
 	return rec
@@ -196,3 +197,35 @@ func TestRateLimit(t *testing.T) {
 }
 
 var _ = io.Discard
+
+func TestHostAllowList(t *testing.T) {
+	s, _ := newTestServer(t, 0)
+
+	ok := do(t, s, "GET", "http://localhost:8080/v1/search?apex=example.com")
+	if ok.Code != 200 {
+		t.Errorf("localhost: code = %d", ok.Code)
+	}
+	rebound := httptest.NewRequest("GET", "/v1/search?apex=example.com", nil)
+	rebound.Host = "evil.example.net"
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, rebound)
+	if rec.Code != http.StatusMisdirectedRequest {
+		t.Errorf("rebound host: code = %d, want 421", rec.Code)
+	}
+	hz := httptest.NewRequest("GET", "/healthz", nil)
+	hz.Host = "evil.example.net"
+	rec2 := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec2, hz)
+	if rec2.Code != http.StatusMisdirectedRequest {
+		t.Errorf("rebound healthz: code = %d, want 421", rec2.Code)
+	}
+
+	s.AllowedHosts = []string{"MyHost.Example.COM"}
+	custom := httptest.NewRequest("GET", "/v1/search?apex=example.com", nil)
+	custom.Host = "myhost.example.com:8099"
+	rec3 := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec3, custom)
+	if rec3.Code != 200 {
+		t.Errorf("custom allowed host: code = %d", rec3.Code)
+	}
+}

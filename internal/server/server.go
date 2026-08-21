@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"log"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -13,12 +14,36 @@ import (
 )
 
 type Server struct {
-	Store       *store.Store
-	Limiter     *Limiter
-	TrustedHops int
-	RateLimit   int64
-	MaxResults  int
-	ReadyFn     func() bool
+	Store        *store.Store
+	Limiter      *Limiter
+	TrustedHops  int
+	RateLimit    int64
+	MaxResults   int
+	AllowedHosts []string
+	ReadyFn      func() bool
+}
+
+var defaultHosts = []string{"localhost", "127.0.0.1", "::1"}
+
+// hostAllowed blocks requests whose Host header is not expected. Browsers
+// always send the origin's real hostname, but a DNS rebinding attack makes
+// attacker.com resolve to 127.0.0.1 while the browser keeps sending
+// attacker.com in Host, which never matches the allow list.
+func (s *Server) hostAllowed(host string) bool {
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	host = strings.ToLower(strings.Trim(host, "[]"))
+	allowed := s.AllowedHosts
+	if len(allowed) == 0 {
+		allowed = defaultHosts
+	}
+	for _, h := range allowed {
+		if host == strings.ToLower(h) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) Handler() http.Handler {
@@ -27,7 +52,15 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/healthz", s.handleHealth)
 	mux.HandleFunc("/readyz", s.handleReady)
 	mux.HandleFunc("/", s.handleRoot)
-	return mux
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !s.hostAllowed(r.Host) {
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			w.WriteHeader(http.StatusMisdirectedRequest)
+			w.Write([]byte("unrecognized host\n"))
+			return
+		}
+		mux.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
