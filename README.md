@@ -4,6 +4,10 @@ subidx is your own copy of crt.name. It watches public Certificate Transparency 
 
 Status: the live pipeline works end to end. A four minute run against the live firehose collected about 470,000 names from 21 logs.
 
+## Note on subfaster
+
+A similar project exists: [subfaster](https://github.com/melvinsh/subfaster). This project was built before its author was aware of subfaster. The two share no code and take different approaches: subfaster queries other people's services (crt.sh, RapidDNS, and friends) at run time, while subidx tails the CT logs itself, builds its own local index, and serves it from your own machine. Any resemblance is convergent evolution, not copying.
+
 ## Quick start
 
 ```
