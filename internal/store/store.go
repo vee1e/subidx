@@ -182,12 +182,17 @@ func (s *Store) apply(batch *pebble.Batch, r Record) error {
 		if err == pebble.ErrNotFound {
 			st = nil
 		} else {
-			st = &recState{
-				firstSeen: int64(binary.BigEndian.Uint64(existing[:8])),
-				source:    existing[8],
-				seq:       binary.BigEndian.Uint64(existing[9:17]),
+			if len(existing) < 17 {
+				closer.Close()
+				st = nil
+			} else {
+				st = &recState{
+					firstSeen: int64(binary.BigEndian.Uint64(existing[:8])),
+					source:    existing[8],
+					seq:       binary.BigEndian.Uint64(existing[9:17]),
+				}
+				closer.Close()
 			}
-			closer.Close()
 		}
 	}
 	if st == nil {
@@ -228,7 +233,11 @@ func (s *Store) pendingCount(apex string) uint64 {
 		s.pendingCounts[apex] = 0
 		return 0
 	}
-	n := binary.BigEndian.Uint64(v)
+	n, ok := beUint64(v)
+	if !ok {
+		s.pendingCounts[apex] = 0
+		return 0
+	}
 	s.pendingCounts[apex] = n
 	return n
 }
@@ -303,7 +312,11 @@ func (s *Store) Count(apex string) (uint64, error) {
 	if v == nil {
 		return 0, nil
 	}
-	return binary.BigEndian.Uint64(v), nil
+	n, ok := beUint64(v)
+	if !ok {
+		return 0, fmt.Errorf("corrupt count value for %s", apex)
+	}
+	return n, nil
 }
 
 func (s *Store) Total() (uint64, error) {
@@ -320,7 +333,11 @@ func (s *Store) Top(n int) ([]ApexCount, error) {
 	defer it.Close()
 	all := make([]ApexCount, 0, 1024)
 	for ok := it.First(); ok; ok = it.Next() {
-		all = append(all, ApexCount{Apex: string(it.Key()[1:]), Count: binary.BigEndian.Uint64(it.Value())})
+		n, ok := beUint64(it.Value())
+		if !ok {
+			continue
+		}
+		all = append(all, ApexCount{Apex: string(it.Key()[1:]), Count: n})
 	}
 	for i := 0; i < len(all); i++ {
 		for j := i + 1; j < len(all); j++ {
@@ -471,7 +488,11 @@ func (s *Store) getMeta(name string) (uint64, error) {
 	if err != nil || v == nil {
 		return 0, err
 	}
-	return binary.BigEndian.Uint64(v), nil
+	n, ok := beUint64(v)
+	if !ok {
+		return 0, fmt.Errorf("corrupt meta value for %s", name)
+	}
+	return n, nil
 }
 
 func recordKey(apex, sub string) []byte {
@@ -497,6 +518,13 @@ func metaKey(name string) []byte {
 }
 
 func totalKey() []byte { return metaKey("total") }
+
+func beUint64(b []byte) (uint64, bool) {
+	if len(b) != 8 {
+		return 0, false
+	}
+	return binary.BigEndian.Uint64(b), true
+}
 
 func encodeValue(firstSeen int64, source byte, seq uint64) []byte {
 	v := make([]byte, 17)

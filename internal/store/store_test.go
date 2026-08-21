@@ -1,6 +1,7 @@
 package store
 
 import (
+	"github.com/cockroachdb/pebble/v2"
 	"path/filepath"
 	"testing"
 	"time"
@@ -98,4 +99,29 @@ func TestRecount(t *testing.T) {
 	if got, _ := st.Total(); got != 4 {
 		t.Errorf("total after recount+ingest = %d, want 4", got)
 	}
+}
+
+func TestCorruptValuesDoNotPanic(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "db")
+	st, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Ingest(Record{Apex: "example.com", Sub: "a.example.com", FirstSeen: 1, Source: 1}); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	st.db.Set([]byte("example.com\x00junk"), []byte{1, 2, 3}, nil)
+	st.db.Set(metaKey("total"), []byte{9}, pebble.Sync)
+	res, err := st.Scan("example.com", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res) != 1 {
+		t.Fatalf("scan = %d results, want 1", len(res))
+	}
+	if _, err := st.Total(); err == nil {
+		t.Error("corrupt meta accepted")
+	}
+	st.Close()
 }
