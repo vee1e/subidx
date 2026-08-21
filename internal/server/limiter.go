@@ -11,10 +11,16 @@ import (
 )
 
 type Limiter struct {
-	limit  int64
-	window time.Duration
-	shards [64]limShard
+	limit      int64
+	window     time.Duration
+	maxBuckets int
+	shards     [64]limShard
 }
+
+// maxBucketsPerShard bounds memory: each tracked key holds a hit list for
+// up to one window. Distinct keys are cheap to mint (spoofed XFF, IPv6
+// /64s), so the map must not grow without bound.
+const maxBucketsPerShard = 4096
 
 type limShard struct {
 	mu      sync.Mutex
@@ -22,7 +28,7 @@ type limShard struct {
 }
 
 func NewLimiter(limit int64, window time.Duration) *Limiter {
-	l := &Limiter{limit: limit, window: window}
+	l := &Limiter{limit: limit, window: window, maxBuckets: maxBucketsPerShard}
 	for i := range l.shards {
 		l.shards[i].buckets = make(map[string][]time.Time)
 	}
@@ -34,6 +40,9 @@ func (l *Limiter) Allow(key string) (remaining int64, ok bool, retryAfter time.D
 	shard := &l.shards[shardIndex(key)]
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
+	if len(shard.buckets) >= l.maxBuckets && shard.buckets[key] == nil {
+		l.evictShard(shard, now)
+	}
 	hits := shard.buckets[key]
 	cutoff := now.Add(-l.window)
 	i := 0
@@ -59,18 +68,39 @@ func (l *Limiter) sweep() {
 	for i := range l.shards {
 		shard := &l.shards[i]
 		shard.mu.Lock()
-		for k, hits := range shard.buckets {
-			j := 0
-			for j < len(hits) && hits[j].Before(cutoff) {
-				j++
-			}
-			if j == len(hits) {
-				delete(shard.buckets, k)
-			} else {
-				shard.buckets[k] = hits[j:]
-			}
-		}
+		l.trimShard(shard, cutoff)
 		shard.mu.Unlock()
+	}
+}
+
+// evictShard makes room in a full shard: expired buckets first, then
+// arbitrary victims if the attack is still filling the window.
+func (l *Limiter) evictShard(shard *limShard, now time.Time) {
+	l.trimShard(shard, now.Add(-l.window))
+	for len(shard.buckets) >= l.maxBuckets {
+		victimized := false
+		for k := range shard.buckets {
+			delete(shard.buckets, k)
+			victimized = true
+			break
+		}
+		if !victimized {
+			break
+		}
+	}
+}
+
+func (l *Limiter) trimShard(shard *limShard, cutoff time.Time) {
+	for k, hits := range shard.buckets {
+		j := 0
+		for j < len(hits) && hits[j].Before(cutoff) {
+			j++
+		}
+		if j == len(hits) {
+			delete(shard.buckets, k)
+		} else {
+			shard.buckets[k] = hits[j:]
+		}
 	}
 }
 
