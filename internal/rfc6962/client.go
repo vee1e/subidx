@@ -36,19 +36,20 @@ type Client struct {
 
 func NewClient(baseURL, keyB64 string) (*Client, error) {
 	c := &Client{BaseURL: baseURL, HTTP: &http.Client{Timeout: 30 * time.Second}}
-	if keyB64 != "" {
-		der, err := base64.StdEncoding.DecodeString(keyB64)
-		if err != nil {
-			return nil, fmt.Errorf("bad log key: %w", err)
-		}
-		pub, err := x509.ParsePKIXPublicKey(der)
-		if err != nil {
-			return nil, fmt.Errorf("bad log key: %w", err)
-		}
-		c.pubKey = pub
-		sum := sha256.Sum256(der)
-		c.logID = sum[:]
+	if keyB64 == "" {
+		return nil, fmt.Errorf("missing log key")
 	}
+	der, err := base64.StdEncoding.DecodeString(keyB64)
+	if err != nil {
+		return nil, fmt.Errorf("bad log key: %w", err)
+	}
+	pub, err := x509.ParsePKIXPublicKey(der)
+	if err != nil {
+		return nil, fmt.Errorf("bad log key: %w", err)
+	}
+	c.pubKey = pub
+	sum := sha256.Sum256(der)
+	c.logID = sum[:]
 	return c, nil
 }
 
@@ -114,8 +115,11 @@ func (e *HTTPError) Error() string {
 }
 
 func (c *Client) VerifySTH(sth *STH) error {
-	if c.pubKey == nil || len(sth.TreeHeadSignature) == 0 {
-		return nil
+	if c.pubKey == nil {
+		return fmt.Errorf("no log key pinned")
+	}
+	if len(sth.TreeHeadSignature) == 0 {
+		return fmt.Errorf("sth has no signature")
 	}
 	ds, err := decodeDigitallySigned(sth.TreeHeadSignature)
 	if err != nil {

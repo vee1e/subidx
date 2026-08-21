@@ -62,6 +62,10 @@ func (t *Tailer) tailOne(ctx context.Context, lg loglist.Log, state string) {
 		log.Printf("tail %s: %v", lg.LogID, err)
 		return
 	}
+	if expected := client.LogID(); lg.LogID != "" && expected != lg.LogID {
+		log.Printf("tail %s: log list key mismatch (sha256(key) = %s), skipping", lg.LogID, expected)
+		return
+	}
 	id := lg.LogID
 	wm, err := t.Store.Watermark(id)
 	if err != nil {
@@ -105,6 +109,10 @@ func (t *Tailer) tailOne(ctx context.Context, lg loglist.Log, state string) {
 		}
 		if err := client.VerifySTH(sth); err != nil {
 			log.Printf("tail %s: verify: %v", client.ShortID(), err)
+			if !sleepCtx(ctx, jitter(interval)) {
+				return
+			}
+			continue
 		}
 		target := sth.TreeSize
 		if drainTarget >= 0 && drainTarget < target {
