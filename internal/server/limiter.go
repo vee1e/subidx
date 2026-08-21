@@ -106,9 +106,22 @@ func ClientKey(r *http.Request, trustedHops int) string {
 				chain = append(chain, strings.TrimSpace(part))
 			}
 		}
-		idx := len(chain) - trustedHops
-		if idx >= 0 && idx < len(chain) {
-			ipStr = chain[idx]
+		// The last trustedHops entries are the ones our trusted proxies
+		// appended. If any of them is not a valid IP the header is bogus,
+		// so fall back to the connection address instead of indexing into
+		// client-controlled data.
+		if len(chain) >= trustedHops && len(chain) <= 64 {
+			trusted := chain[len(chain)-trustedHops:]
+			bogus := false
+			for _, p := range trusted {
+				if _, err := netip.ParseAddr(p); err != nil {
+					bogus = true
+					break
+				}
+			}
+			if !bogus {
+				ipStr = trusted[0]
+			}
 		}
 	}
 	addr, err := netip.ParseAddr(ipStr)
