@@ -116,7 +116,7 @@ func (t *Tailer) tailOne(ctx context.Context, lg loglist.Log, state string) {
 				log.Printf("tail %s: entries: %v", client.ShortID(), err)
 			}
 			wm += n
-			if err := t.Store.SetWatermarkSync(id, wm); err != nil {
+			if err := t.Store.AdvanceWatermark(id, wm); err != nil {
 				log.Printf("tail %s: watermark: %v", client.ShortID(), err)
 			}
 		}

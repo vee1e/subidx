@@ -38,7 +38,7 @@ var errStoreClosed = fmt.Errorf("store closed")
 
 type Store struct {
 	db     *pebble.DB
-	ch     chan Record
+	ch     chan ingestOp
 	done   chan struct{}
 	seq    uint64
 	mu     sync.Mutex
@@ -46,8 +46,16 @@ type Store struct {
 
 	pendingRecords map[string]*recState
 	pendingCounts  map[string]uint64
+	pendingWM      map[string]int64
+	wmHigh         map[string]int64
 	pendingTotal   uint64
 	totalBase      uint64
+}
+
+type ingestOp struct {
+	rec   *Record
+	logID string
+	wm    int64
 }
 
 func Open(dir string) (*Store, error) {
@@ -57,10 +65,12 @@ func Open(dir string) (*Store, error) {
 	}
 	s := &Store{
 		db:             db,
-		ch:             make(chan Record, 4096),
+		ch:             make(chan ingestOp, 4096),
 		done:           make(chan struct{}),
 		pendingRecords: make(map[string]*recState),
 		pendingCounts:  make(map[string]uint64),
+		pendingWM:      make(map[string]int64),
+		wmHigh:         make(map[string]int64),
 	}
 	if v, err := s.getMeta("seq"); err == nil {
 		s.seq = v
@@ -78,7 +88,7 @@ func (s *Store) ingestLoop() {
 	pending := 0
 	defer batch.Close()
 	flush := func() error {
-		if batch.Count() == 0 {
+		if batch.Count() == 0 && len(s.pendingWM) == 0 {
 			return nil
 		}
 		var seqBuf [8]byte
@@ -86,11 +96,19 @@ func (s *Store) ingestLoop() {
 		if err := batch.Set(metaKey("seq"), seqBuf[:], nil); err != nil {
 			return err
 		}
+		var wmBuf [8]byte
+		for id, n := range s.pendingWM {
+			binary.BigEndian.PutUint64(wmBuf[:], uint64(n))
+			if err := batch.Set(metaKey("wm/"+id), wmBuf[:], nil); err != nil {
+				return err
+			}
+		}
 		if err := batch.Commit(pebble.Sync); err != nil {
 			return err
 		}
 		s.pendingRecords = make(map[string]*recState)
 		s.pendingCounts = make(map[string]uint64)
+		s.pendingWM = make(map[string]int64)
 		s.pendingTotal = 0
 		pending = 0
 		batch.Reset()
@@ -98,15 +116,22 @@ func (s *Store) ingestLoop() {
 	}
 	for {
 		select {
-		case r, ok := <-s.ch:
+		case op, ok := <-s.ch:
 			if !ok {
 				if err := flush(); err != nil {
 					log.Printf("store final flush: %v", err)
 				}
 				return
 			}
-			if err := s.apply(batch, r); err != nil {
-				log.Printf("store apply %s/%s: %v", r.Apex, r.Sub, err)
+			if op.rec == nil {
+				if cur, ok := s.wmHigh[op.logID]; !ok || op.wm > cur {
+					s.wmHigh[op.logID] = op.wm
+					s.pendingWM[op.logID] = op.wm
+				}
+				continue
+			}
+			if err := s.apply(batch, *op.rec); err != nil {
+				log.Printf("store apply %s/%s: %v", op.rec.Apex, op.rec.Sub, err)
 				continue
 			}
 			s.seq++
@@ -118,7 +143,7 @@ func (s *Store) ingestLoop() {
 				pending = 0
 			}
 		case <-time.After(20 * time.Millisecond):
-			if pending > 0 {
+			if pending > 0 || len(s.pendingWM) > 0 {
 				if err := flush(); err != nil {
 					log.Printf("store flush: %v", err)
 				}
@@ -203,7 +228,20 @@ func (s *Store) Ingest(r Record) error {
 	if s.closed {
 		return errStoreClosed
 	}
-	s.ch <- r
+	s.ch <- ingestOp{rec: &r}
+	return nil
+}
+
+// AdvanceWatermark records a new high-water mark for a log. It is persisted in
+// the same atomic batch as the records ingested before it, so a crash can
+// never persist the marker without the data it covers (or vice versa).
+func (s *Store) AdvanceWatermark(logID string, n int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return errStoreClosed
+	}
+	s.ch <- ingestOp{logID: logID, wm: n}
 	return nil
 }
 
