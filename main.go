@@ -96,7 +96,7 @@ func addCommon(fs *flag.FlagSet) *commonConfig {
 func cmdServe(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	c := addCommon(fs)
-	addr := fs.String("addr", ":8080", "listen address")
+	addr := fs.String("addr", "127.0.0.1:8080", "listen address")
 	noTail := fs.Bool("no-tail", false, "disable CT tailers")
 	rateLimit := fs.Int64("rate-limit", 1000, "requests per rolling 24h per IP")
 	maxResults := fs.Int("max-results", store.DefaultScanLimit, "max results buffered per search query")
@@ -137,7 +137,15 @@ func cmdServe(args []string) error {
 	}
 	srv.Limiter.StartSweeper(ctx.Done())
 
-	httpSrv := &http.Server{Addr: *addr, Handler: srv.Handler()}
+	httpSrv := &http.Server{
+		Addr:              *addr,
+		Handler:           srv.Handler(),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    8192,
+	}
 	errCh := make(chan error, 1)
 	go func() { errCh <- httpSrv.ListenAndServe() }()
 

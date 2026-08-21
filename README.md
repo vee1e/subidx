@@ -41,7 +41,7 @@ Useful flags:
 | Flag | Default | Meaning |
 |---|---|---|
 | `-store` | `./data` | Where the database lives |
-| `-addr` | `:8080` | Listen address for `serve` |
+| `-addr` | `127.0.0.1:8080` | Listen address for `serve` (binds localhost by default; use `:8080` to expose) |
 | `-poll-interval` | `3s` | How often each log is checked for new entries |
 | `-window` | `512` | Entries fetched per request while catching up |
 | `-no-drain` | off | Skip old and rejected logs (they hold years of history, terabytes) |
