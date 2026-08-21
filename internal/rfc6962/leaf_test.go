@@ -128,11 +128,7 @@ func buildSCTListDER(t *testing.T, stamps ...int64) []byte {
 		list = append(list, sct...)
 	}
 	binary.BigEndian.PutUint16(list[base-2:], uint16(len(list)-base))
-	der, err := asn1MarshalOctetString(list)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return der
+	return list
 }
 
 func TestEmbeddedSCTTimestamps(t *testing.T) {

@@ -125,10 +125,10 @@ func parseSAN(octets []byte) []string {
 }
 
 func parseSCTList(octets []byte) []int64 {
-	var list []byte
-	if _, err := asn1.Unmarshal(octets, &list); err != nil {
-		return nil
-	}
+	// Per RFC 6962 section 3.3, the extension value is already the
+	// TLS-encoded SCT list: uint16 total length followed by
+	// length-prefixed SCTs. Callers pass the OCTET STRING contents.
+	list := octets
 	if len(list) < 2 {
 		return nil
 	}
