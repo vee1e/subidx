@@ -156,11 +156,11 @@ func (t *Tailer) fetchRange(ctx context.Context, client *rfc6962.Client, logID s
 		if len(entries) == 0 {
 			return total, nil
 		}
-		decoded := int64(0)
+		skipped := int64(0)
 		for _, e := range entries {
 			leaf, err := rfc6962.DecodeLeafEntry(e)
-			decoded++
 			if err != nil {
+				skipped++
 				continue
 			}
 			fs := leaf.Timestamp
@@ -170,6 +170,7 @@ func (t *Tailer) fetchRange(ctx context.Context, client *rfc6962.Client, logID s
 				}
 			}
 			if fs <= 0 {
+				skipped++
 				continue
 			}
 			for _, name := range leaf.Names {
@@ -182,8 +183,15 @@ func (t *Tailer) fetchRange(ctx context.Context, client *rfc6962.Client, logID s
 				}
 			}
 		}
-		total += decoded
-		pos += decoded
+		if skipped > 0 {
+			log.Printf("tail %s: skipped %d undecodable entries in [%d,%d]", client.ShortID(), skipped, pos, end)
+		}
+		n := int64(len(entries))
+		if pos+n > to {
+			n = to - pos
+		}
+		total += n
+		pos += n
 	}
 	return total, nil
 }
