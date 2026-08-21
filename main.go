@@ -99,11 +99,12 @@ func cmdServe(args []string) error {
 	addr := fs.String("addr", ":8080", "listen address")
 	noTail := fs.Bool("no-tail", false, "disable CT tailers")
 	rateLimit := fs.Int64("rate-limit", 1000, "requests per rolling 24h per IP")
+	maxResults := fs.Int("max-results", store.DefaultScanLimit, "max results buffered per search query")
 	trustedHops := fs.Int("trusted-proxy-hops", 0, "trusted proxies in front (0 = ignore X-Forwarded-For)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *trustedHops < 0 || *rateLimit <= 0 {
+	if *trustedHops < 0 || *rateLimit <= 0 || *maxResults <= 0 {
 		return fmt.Errorf("invalid config")
 	}
 
@@ -124,6 +125,7 @@ func cmdServe(args []string) error {
 		Limiter:     server.NewLimiter(*rateLimit, 24*time.Hour),
 		TrustedHops: *trustedHops,
 		RateLimit:   *rateLimit,
+		MaxResults:  *maxResults,
 		ReadyFn: func() bool {
 			t, err := st.Total()
 			return err == nil && t >= 0

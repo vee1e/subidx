@@ -46,6 +46,7 @@ Useful flags:
 | `-window` | `512` | Entries fetched per request while catching up |
 | `-no-drain` | off | Skip old and rejected logs (they hold years of history, terabytes) |
 | `-rate-limit` | `1000` | Search requests allowed per IP per rolling 24 hours |
+| `-max-results` | `100000` | Max results buffered per search query (newest-collected first) |
 | `-trusted-proxy-hops` | `0` | How many proxies in front of you. 0 means X-Forwarded-For is ignored |
 
 Only one process can use a store directory at a time. The database takes an exclusive lock.

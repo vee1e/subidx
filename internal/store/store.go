@@ -1,10 +1,10 @@
 package store
 
 import (
+	"container/heap"
 	"encoding/binary"
 	"fmt"
 	"log"
-	"sort"
 	"sync"
 	"time"
 
@@ -245,7 +245,23 @@ func (s *Store) AdvanceWatermark(logID string, n int64) error {
 	return nil
 }
 
-func (s *Store) Scan(apex string) ([]Result, error) {
+// DefaultScanLimit caps how many results Scan will buffer for a single
+// query. Popular apexes can have millions of records; without a cap one
+// request can exhaust memory.
+const DefaultScanLimit = 100000
+
+type resultHeap []Result
+
+func (h resultHeap) Len() int            { return len(h) }
+func (h resultHeap) Less(i, j int) bool  { return h[i].Seq < h[j].Seq }
+func (h resultHeap) Swap(i, j int)       { h[i], h[j] = h[j], h[i] }
+func (h *resultHeap) Push(x any)         { *h = append(*h, x.(Result)) }
+func (h *resultHeap) Pop() any           { old := *h; n := len(old); x := old[n-1]; *h = old[:n-1]; return x }
+
+func (s *Store) Scan(apex string, limit int) ([]Result, error) {
+	if limit <= 0 {
+		limit = DefaultScanLimit
+	}
 	lo := []byte(recordKey(apex, ""))
 	hi := make([]byte, len(apex)+1)
 	copy(hi, apex)
@@ -255,20 +271,28 @@ func (s *Store) Scan(apex string) ([]Result, error) {
 		return nil, err
 	}
 	defer it.Close()
-	var out []Result
+	h := &resultHeap{}
 	for ok := it.First(); ok; ok = it.Next() {
 		v := it.Value()
 		if len(v) < 17 {
 			continue
 		}
-		sub := string(it.Key()[len(lo):])
-		out = append(out, Result{
-			Sub:       sub,
+		r := Result{
+			Sub:       string(it.Key()[len(lo):]),
 			FirstSeen: int64(binary.BigEndian.Uint64(v[:8])),
 			Seq:       binary.BigEndian.Uint64(v[9:17]),
-		})
+		}
+		if h.Len() < limit {
+			heap.Push(h, r)
+		} else if r.Seq > (*h)[0].Seq {
+			(*h)[0] = r
+			heap.Fix(h, 0)
+		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Seq < out[j].Seq })
+	out := make([]Result, h.Len())
+	for i := range out {
+		out[i] = heap.Pop(h).(Result)
+	}
 	return out, it.Error()
 }
 

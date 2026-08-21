@@ -172,7 +172,7 @@ func TestTailToSearchRoundTrip(t *testing.T) {
 
 			deadline := time.Now().Add(10 * time.Second)
 			for {
-				res, err := st.Scan("example.com")
+				res, err := st.Scan("example.com", 0)
 				if err == nil && len(res) == 3 {
 					break
 				}
@@ -181,7 +181,7 @@ func TestTailToSearchRoundTrip(t *testing.T) {
 				}
 				time.Sleep(10 * time.Millisecond)
 			}
-			res, _ := st.Scan("example.com")
+			res, _ := st.Scan("example.com", 0)
 			want := map[string]int64{
 				"roundtrip.example.com":      ts1,
 				"www.roundtrip.example.com":  ts1,

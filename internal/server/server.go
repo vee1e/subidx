@@ -17,6 +17,7 @@ type Server struct {
 	Limiter     *Limiter
 	TrustedHops int
 	RateLimit   int64
+	MaxResults  int
 	ReadyFn     func() bool
 }
 
@@ -101,7 +102,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	results, err := s.Store.Scan(a)
+	results, err := s.Store.Scan(a, s.MaxResults)
 	if err != nil {
 		log.Printf("scan %s: %v", a, err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
