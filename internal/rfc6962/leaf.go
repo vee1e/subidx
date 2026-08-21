@@ -135,7 +135,7 @@ func dedupeLower(in []string) []string {
 		s = lowerASCII(s)
 		s = trimTrailingDot(s)
 		s = strings.TrimPrefix(s, "*.")
-		if s == "" || !printableASCII(s) {
+		if s == "" || hasControlByte(s) {
 			continue
 		}
 		if _, ok := seen[s]; ok {
@@ -147,14 +147,15 @@ func dedupeLower(in []string) []string {
 	return out
 }
 
-// printableASCII rejects control characters, spaces, and non-ASCII bytes.
-// Hostnames must never contain them, and the store uses 0x00 as its key
-// separator, so a NUL byte from a hostile certificate would corrupt keys.
-func printableASCII(s string) bool {
+// hasControlByte rejects control characters early. Hostnames must never
+// contain them, and the store uses 0x00 as its key separator, so a NUL byte
+// from a hostile certificate would corrupt keys. Full charset validation
+// happens in apex.Canonical.
+func hasControlByte(s string) bool {
 	for i := 0; i < len(s); i++ {
-		if s[i] < 0x21 || s[i] > 0x7e {
-			return false
+		if s[i] < 0x20 || s[i] == 0x7f {
+			return true
 		}
 	}
-	return true
+	return false
 }

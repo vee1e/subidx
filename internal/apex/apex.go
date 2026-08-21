@@ -15,7 +15,7 @@ var specialUseSuffixes = []string{
 }
 
 func Normalize(input string) (string, error) {
-	s := strings.ToLower(strings.TrimSpace(input))
+	s := strings.TrimSpace(input)
 	s = strings.TrimSuffix(s, ".")
 	if s == "" {
 		return "", fmt.Errorf("empty name")
@@ -39,6 +39,40 @@ func Normalize(input string) (string, error) {
 		}
 	}
 	return s, nil
+}
+
+var ingestProfile = idna.New(idna.MapForLookup())
+
+// Canonical prepares an ingest-side hostname for storage: unicode names are
+// mapped to punycode (with case folding) so stored records match what search
+// clients ask for. Names the IDNA lookup profile rejects but that are plain
+// ASCII with common service characters (e.g. DKIM-style underscores) are
+// kept, since they are useful recon data.
+func Canonical(host string) (string, bool) {
+	s := strings.TrimPrefix(host, "*.")
+	s = strings.TrimSuffix(s, ".")
+	if s == "" || len(s) > 253 {
+		return "", false
+	}
+	if ascii, err := ingestProfile.ToASCII(s); err == nil {
+		s = ascii
+	} else {
+		for i := 0; i < len(s); i++ {
+			c := s[i]
+			switch {
+			case c >= 'a' && c <= 'z', c >= '0' && c <= '9':
+			case c == '.' || c == '-' || c == '_':
+			default:
+				return "", false
+			}
+		}
+	}
+	for _, label := range strings.Split(s, ".") {
+		if len(label) == 0 || len(label) > 63 {
+			return "", false
+		}
+	}
+	return s, true
 }
 
 func ValidateApex(normalized string) (string, error) {

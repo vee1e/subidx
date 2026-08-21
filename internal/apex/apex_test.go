@@ -1,6 +1,9 @@
 package apex
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestNormalize(t *testing.T) {
 	cases := []struct {
@@ -61,6 +64,28 @@ func TestNormalizeRejectsControlChars(t *testing.T) {
 	for _, in := range []string{"ab\x00cd.com", "a\x7f.com", "a b.com", "a\n.com"} {
 		if got, err := Normalize(in); err == nil {
 			t.Errorf("Normalize(%q) = %q, want error", in, got)
+		}
+	}
+}
+
+func TestCanonical(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+		ok   bool
+	}{
+		{"example.com", "example.com", true},
+		{"bücher.example.com", "xn--bcher-kva.example.com", true},
+		{"_dmarc.example.com", "_dmarc.example.com", true},
+		{"ab\x00cd.example.com", "", false},
+		{"a..b.com", "", false},
+		{strings.Repeat("a", 64) + ".com", "", false},
+		{"*.example.com", "example.com", true},
+	}
+	for _, c := range cases {
+		got, ok := Canonical(c.in)
+		if ok != c.ok || (ok && got != c.want) {
+			t.Errorf("Canonical(%q) = %q, %v; want %q, %v", c.in, got, ok, c.want, c.ok)
 		}
 	}
 }

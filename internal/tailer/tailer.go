@@ -174,11 +174,15 @@ func (t *Tailer) fetchRange(ctx context.Context, client *rfc6962.Client, logID s
 				continue
 			}
 			for _, name := range leaf.Names {
-				a, ok := apex.ApexOf(name)
+				c, ok := apex.Canonical(name)
 				if !ok {
 					continue
 				}
-				if err := t.Store.Ingest(store.Record{Apex: a, Sub: name, FirstSeen: fs, Source: sourceCT}); err != nil {
+				a, ok := apex.ApexOf(c)
+				if !ok {
+					continue
+				}
+				if err := t.Store.Ingest(store.Record{Apex: a, Sub: c, FirstSeen: fs, Source: sourceCT}); err != nil {
 					return total, err
 				}
 			}
