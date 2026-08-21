@@ -59,7 +59,7 @@ func (t *Tailer) Wait() {
 func (t *Tailer) tailOne(ctx context.Context, lg loglist.Log, state string) {
 	client, err := rfc6962.NewClient(lg.Endpoint(), lg.Key)
 	if err != nil {
-		log.Printf("tail %s: %v", client.ShortID(), err)
+		log.Printf("tail %s: %v", lg.LogID, err)
 		return
 	}
 	id := lg.LogID
