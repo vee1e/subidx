@@ -23,6 +23,11 @@ func Normalize(input string) (string, error) {
 	if strings.ContainsAny(s, "/\\?#@ ") {
 		return "", fmt.Errorf("invalid characters")
 	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < 0x21 || s[i] > 0x7e {
+			return "", fmt.Errorf("invalid characters")
+		}
+	}
 	ascii, err := lookupProfile.ToASCII(s)
 	if err != nil {
 		return "", err

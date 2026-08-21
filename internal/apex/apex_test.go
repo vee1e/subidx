@@ -56,3 +56,11 @@ func TestApexOf(t *testing.T) {
 		t.Errorf("private suffix handling = %q, %v", a, ok)
 	}
 }
+
+func TestNormalizeRejectsControlChars(t *testing.T) {
+	for _, in := range []string{"ab\x00cd.com", "a\x7f.com", "a b.com", "a\n.com"} {
+		if got, err := Normalize(in); err == nil {
+			t.Errorf("Normalize(%q) = %q, want error", in, got)
+		}
+	}
+}

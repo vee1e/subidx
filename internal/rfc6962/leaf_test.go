@@ -167,3 +167,15 @@ func TestDecodeGarbage(t *testing.T) {
 		t.Error("wrong leaf type accepted")
 	}
 }
+
+func TestControlBytesRejected(t *testing.T) {
+	cert := makeCert(t, []string{"ab\x00cd.example.com", "ok.example.com"})
+	signed := append(uint24(len(cert.Raw)), cert.Raw...)
+	leaf, err := DecodeLeafEntry(LeafEntry{LeafInput: buildLeaf(0, signed, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(leaf.Names) != 1 || leaf.Names[0] != "ok.example.com" {
+		t.Errorf("names = %q, want [ok.example.com]", leaf.Names)
+	}
+}
