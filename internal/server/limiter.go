@@ -41,7 +41,14 @@ func (l *Limiter) Allow(key string) (remaining int64, ok bool, retryAfter time.D
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
 	if len(shard.buckets) >= l.maxBuckets && shard.buckets[key] == nil {
-		l.evictShard(shard, now)
+		l.trimShard(shard, now.Add(-l.window))
+		if len(shard.buckets) >= l.maxBuckets {
+			// Fail closed: evicting a live bucket would let an attacker
+			// mint fresh keys until their own (or a victim's) full bucket
+			// is dropped, resetting its counter and defeating the limit.
+			// Deny unknown keys while the shard is full instead.
+			return 0, false, l.window
+		}
 	}
 	hits := shard.buckets[key]
 	cutoff := now.Add(-l.window)
@@ -73,23 +80,7 @@ func (l *Limiter) sweep() {
 	}
 }
 
-// evictShard makes room in a full shard: expired buckets first, then
-// arbitrary victims if the attack is still filling the window.
-func (l *Limiter) evictShard(shard *limShard, now time.Time) {
-	l.trimShard(shard, now.Add(-l.window))
-	for len(shard.buckets) >= l.maxBuckets {
-		victimized := false
-		for k := range shard.buckets {
-			delete(shard.buckets, k)
-			victimized = true
-			break
-		}
-		if !victimized {
-			break
-		}
-	}
-}
-
+// trimShard drops buckets whose hits have all expired past cutoff.
 func (l *Limiter) trimShard(shard *limShard, cutoff time.Time) {
 	for k, hits := range shard.buckets {
 		j := 0

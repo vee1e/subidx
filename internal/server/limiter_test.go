@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 func TestClientKeyIgnoresBogusXFF(t *testing.T) {
@@ -35,5 +36,39 @@ func TestLimiterBucketsBounded(t *testing.T) {
 	}
 	if total > maxBucketsPerShard*64 {
 		t.Errorf("buckets = %d, want <= %d", total, maxBucketsPerShard*64)
+	}
+}
+
+func TestLimiterFullShardFailsClosed(t *testing.T) {
+	l := &Limiter{limit: 10, window: time.Hour, maxBuckets: 1}
+	for i := range l.shards {
+		l.shards[i].buckets = make(map[string][]time.Time)
+	}
+	first := "client-a"
+	peer := ""
+	for i := 0; i < 10000 && peer == ""; i++ {
+		if k := fmt.Sprintf("k%d", i); shardIndex(k) == shardIndex(first) && k != first {
+			peer = k
+		}
+	}
+	if peer == "" {
+		t.Fatal("no key found hashing to the same shard")
+	}
+
+	if _, ok, _ := l.Allow(first); !ok {
+		t.Fatal("first key should be admitted")
+	}
+	// Shard is full (maxBuckets=1). The unknown peer key must be denied
+	// rather than evicting the live bucket, which would reset first's
+	// counter.
+	_, ok, retry := l.Allow(peer)
+	if ok {
+		t.Fatal("unknown key should be denied when shard is full")
+	}
+	if retry <= 0 {
+		t.Fatalf("retryAfter = %v; want > 0", retry)
+	}
+	if _, ok, _ := l.Allow(first); !ok {
+		t.Fatal("existing key's bucket must survive peer admission attempts")
 	}
 }
