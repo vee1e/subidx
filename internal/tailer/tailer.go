@@ -69,7 +69,11 @@ func (t *Tailer) tailOne(ctx context.Context, lg loglist.Log, state string) {
 	id := lg.LogID
 	wm, err := t.Store.Watermark(id)
 	if err != nil {
-		wm = 0
+		// A read failure is indistinguishable from corruption. Assuming
+		// zero here would re-drain the entire log from index 0, so skip
+		// the log instead; the watermark is retried on next process start.
+		log.Printf("tail %s: watermark read failed: %v; skipping log to avoid full re-drain", client.ShortID(), err)
+		return
 	}
 	drainTarget := int64(-1)
 	switch state {

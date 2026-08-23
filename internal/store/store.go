@@ -466,6 +466,15 @@ func (s *Store) recountInLoop(flush func() error, batch *pebble.Batch) (uint64, 
 }
 
 func (s *Store) getRaw(k []byte) ([]byte, error) {
+	// Hold mu across the read: Close marks the store closed under mu before
+	// closing pebble, so a read that starts before Close finishes safely,
+	// and one that starts after returns an error instead of panicking
+	// inside pebble ("pebble: closed").
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil, errStoreClosed
+	}
 	v, closer, err := s.db.Get(k)
 	if err == pebble.ErrNotFound {
 		return nil, nil

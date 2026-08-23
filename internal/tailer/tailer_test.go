@@ -232,3 +232,35 @@ func TestSTHRegressionIgnored(t *testing.T) {
 		t.Errorf("watermark rewound to %d", wm)
 	}
 }
+
+func TestWatermarkErrorSkipsLog(t *testing.T) {
+	fl := newFakeLog(t)
+	keyB64, logID := fl.keyB64(t)
+	der := makeLeafCert(t, []string{"wmfail.example.com"})
+	fl.entries = [][]byte{fl.leafInput(der, 1000)}
+	srv := fl.serve(t)
+	defer srv.Close()
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A closed store makes Watermark fail, as it would on IO trouble or
+	// corruption. The tailer must skip the log, not assume watermark 0
+	// and re-drain it from the beginning.
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	tr := &Tailer{Store: st, Interval: time.Millisecond}
+	tr.Sync(context.Background(), []loglist.Log{{
+		LogID: logID,
+		Key:   keyB64,
+		URL:   srv.URL,
+		State: map[string]loglist.StateDetail{"usable": {}},
+	}})
+	tr.Wait()
+	if fl.sthHits != 0 {
+		t.Fatalf("tailer contacted log %d times despite watermark read failure", fl.sthHits)
+	}
+}
