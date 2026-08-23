@@ -48,3 +48,35 @@ func TestNewClientTrimsTrailingSlash(t *testing.T) {
 		t.Fatal("no request reached the server")
 	}
 }
+
+func TestNewClientRejectsPlainHTTP(t *testing.T) {
+	if _, err := NewClient("http://ct.example.com/", testKeyB64(t)); err == nil {
+		t.Fatal("NewClient should reject non-loopback plain http")
+	}
+}
+
+func TestClientDoesNotFollowRedirects(t *testing.T) {
+	var targetHits atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		targetHits.Add(1)
+		w.Write([]byte(`{}`))
+	}))
+	defer target.Close()
+
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/ct/v1/get-sth", http.StatusFound)
+	}))
+	defer source.Close()
+
+	c, err := NewClient(source.URL, testKeyB64(t)) // loopback http is allowed
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = c.STH(context.Background())
+	if err == nil {
+		t.Fatal("STH via redirecting server should fail")
+	}
+	if targetHits.Load() != 0 {
+		t.Fatalf("redirect was followed to target (%d hits)", targetHits.Load())
+	}
+}

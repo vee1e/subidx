@@ -12,7 +12,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -36,11 +38,31 @@ type Client struct {
 }
 
 func NewClient(baseURL, keyB64 string) (*Client, error) {
-	// Log list URLs are joined with "/ct/v1/..." paths below; a trailing
-	// slash would produce "//ct/v1/..." and every request would 404.
-	c := &Client{BaseURL: strings.TrimRight(baseURL, "/"), HTTP: &http.Client{Timeout: 30 * time.Second}}
 	if keyB64 == "" {
 		return nil, fmt.Errorf("missing log key")
+	}
+	// Log list URLs are joined with "/ct/v1/..." paths below; a trailing
+	// slash would produce "//ct/v1/..." and every request would 404.
+	baseURL = strings.TrimRight(baseURL, "/")
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		return nil, fmt.Errorf("bad log url: %w", err)
+	}
+	// Endpoints come from externally fetched log lists, so treat them as
+	// untrusted input: plain http is only tolerated on loopback (local
+	// test servers), and redirects are never followed — a hijacked list
+	// source must not be able to aim the tailer at internal hosts.
+	if u.Scheme != "https" && !isLoopbackHost(u.Hostname()) {
+		return nil, fmt.Errorf("log url must be https, got %q", u.Scheme)
+	}
+	c := &Client{
+		BaseURL: baseURL,
+		HTTP: &http.Client{
+			Timeout: 30 * time.Second,
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
 	}
 	der, err := base64.StdEncoding.DecodeString(keyB64)
 	if err != nil {
@@ -54,6 +76,14 @@ func NewClient(baseURL, keyB64 string) (*Client, error) {
 	sum := sha256.Sum256(der)
 	c.logID = sum[:]
 	return c, nil
+}
+
+func isLoopbackHost(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func (c *Client) LogID() string {

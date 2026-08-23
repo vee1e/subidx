@@ -86,7 +86,14 @@ func (l *Log) Endpoint() string {
 
 func FetchAll(ctx context.Context, client *http.Client) ([]Log, error) {
 	if client == nil {
-		client = &http.Client{Timeout: 30 * time.Second}
+		client = &http.Client{
+			Timeout: 30 * time.Second,
+			// The list sources are fixed https URLs; never follow a
+			// redirect so a hijacked source cannot redirect us elsewhere.
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		}
 	}
 	urls := []string{ChromeList, ChromeAllList, AppleList}
 	seen := make(map[string]*Log)
