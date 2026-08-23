@@ -175,3 +175,21 @@ func TestControlBytesRejected(t *testing.T) {
 		t.Errorf("names = %q, want [ok.example.com]", leaf.Names)
 	}
 }
+
+func TestPrecertNamesNormalized(t *testing.T) {
+	cert := makeCert(t, []string{"Mixed.Case.Example.COM", "mixed.case.example.com.", "*.Wild.Example.com"})
+	signed := append(append(make([]byte, 32), uint24(len(cert.RawTBSCertificate))...), cert.RawTBSCertificate...)
+	leaf, err := DecodeLeafEntry(LeafEntry{LeafInput: buildLeaf(1, signed, 42)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"mixed.case.example.com", "wild.example.com"}
+	if len(leaf.Names) != len(want) {
+		t.Fatalf("names = %v; want %v", leaf.Names, want)
+	}
+	for i := range want {
+		if leaf.Names[i] != want[i] {
+			t.Fatalf("names[%d] = %q; want %q", i, leaf.Names[i], want[i])
+		}
+	}
+}

@@ -57,7 +57,9 @@ func DecodeLeafEntry(e LeafEntry) (*DecodedLeaf, error) {
 		if err != nil {
 			return nil, err
 		}
-		out.Names = names
+		// Same normalization as the x509 path: lowercase, strip trailing
+		// dots and wildcard prefixes, reject control bytes, dedupe.
+		out.Names = dedupeLower(names)
 		out.SCTStamps = scts
 	default:
 		return nil, fmt.Errorf("unknown entry type %d", te.EntryType)
