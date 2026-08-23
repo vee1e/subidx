@@ -14,10 +14,6 @@ import (
 
 var asn1OIDSCT = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 11129, 2, 4, 2}
 
-func asn1MarshalOctetString(b []byte) ([]byte, error) {
-	return asn1.Marshal(b)
-}
-
 func makeCert(t *testing.T, dns []string) *x509.Certificate {
 	return makeCertWithExtra(t, dns, pkix.Extension{})
 }

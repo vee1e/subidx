@@ -141,8 +141,8 @@ func cmdServe(args []string) error {
 		MaxResults:   *maxResults,
 		AllowedHosts: hosts,
 		ReadyFn: func() bool {
-			t, err := st.Total()
-			return err == nil && t >= 0
+			_, err := st.Total()
+			return err == nil
 		},
 	}
 	srv.Limiter.StartSweeper(ctx.Done())
