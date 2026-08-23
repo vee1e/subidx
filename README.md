@@ -11,7 +11,7 @@ What that buys you in a recon workflow:
 - **Continuous coverage.** The tailer runs 24/7 with crash-safe resume. A certificate issued thirty seconds ago is already searchable. Point-in-time tools only see what third parties had indexed when you ran them.
 - **First-seen timelines.** Every name carries the earliest date it appeared in any watched log (`&dates=1`). Diff over time to catch new subdomains on targets between engagements.
 - **No keys, no quotas.** Zero API keys, zero third-party terms of service. Your only dependencies are the log lists themselves.
-- **Verified provenance.** Each log's signing key is pinned, signed tree heads are verified, and entries failing verification are never ingested.
+- **Verified provenance.** Each log's signing key is pinned against the log list, and every signed tree head is cryptographically verified before the tailer acts on it. Entries themselves are not individually inclusion-proof-checked against the signed root: ingestion trusts the verified STH plus HTTPS to the log endpoint.
 - **Historical drains.** Years of history from retired and rejected logs can be backfilled locally — terabytes if you want all of it.
 - **A hosted API, not just a CLI.** Pipe results straight into your existing tooling: `curl "http://localhost:8099/v1/search?apex=target.com"`.
 
