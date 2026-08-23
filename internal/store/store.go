@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"log"
+	"sort"
 	"sync"
 	"time"
 
@@ -339,13 +340,7 @@ func (s *Store) Top(n int) ([]ApexCount, error) {
 		}
 		all = append(all, ApexCount{Apex: string(it.Key()[1:]), Count: n})
 	}
-	for i := 0; i < len(all); i++ {
-		for j := i + 1; j < len(all); j++ {
-			if all[j].Count > all[i].Count {
-				all[i], all[j] = all[j], all[i]
-			}
-		}
-	}
+	sort.Slice(all, func(i, j int) bool { return all[i].Count > all[j].Count })
 	if len(all) > n {
 		all = all[:n]
 	}

@@ -1,6 +1,7 @@
 package store
 
 import (
+	"fmt"
 	"github.com/cockroachdb/pebble/v2"
 	"path/filepath"
 	"testing"
@@ -124,4 +125,43 @@ func TestCorruptValuesDoNotPanic(t *testing.T) {
 		t.Error("corrupt meta accepted")
 	}
 	st.Close()
+}
+
+func TestTopOrdersByCount(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "db")
+	st, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	counts := map[string]int{
+		"a.example.com": 3,
+		"b.example.com": 7,
+		"c.example.com": 1,
+		"d.example.com": 5,
+	}
+	for apexName, n := range counts {
+		for i := int64(0); i < int64(n); i++ {
+			if err := st.Ingest(Record{Apex: apexName, Sub: fmt.Sprintf("s%d.%s", i, apexName), FirstSeen: 1000, Source: 1}); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	time.Sleep(150 * time.Millisecond) // let the async ingest loop settle
+	top, err := st.Top(3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(top) != 3 {
+		t.Fatalf("len(top) = %d; want 3", len(top))
+	}
+	want := []string{"b.example.com", "d.example.com", "a.example.com"}
+	for i, ac := range top {
+		if ac.Apex != want[i] {
+			t.Fatalf("top[%d] = %s (%d); want %s (%d)", i, ac.Apex, ac.Count, want[i], counts[want[i]])
+		}
+		if ac.Count != uint64(counts[want[i]]) {
+			t.Fatalf("top[%d].Count = %d; want %d", i, ac.Count, counts[want[i]])
+		}
+	}
 }
