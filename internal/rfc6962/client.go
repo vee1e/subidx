@@ -154,6 +154,12 @@ func (c *Client) VerifySTH(sth *STH) error {
 	if len(sth.TreeHeadSignature) == 0 {
 		return fmt.Errorf("sth has no signature")
 	}
+	if len(sth.SHA256RootHash) != 32 {
+		return fmt.Errorf("sth root hash has %d bytes; want 32", len(sth.SHA256RootHash))
+	}
+	if sth.TreeSize < 0 {
+		return fmt.Errorf("sth tree size %d is negative", sth.TreeSize)
+	}
 	ds, err := decodeDigitallySigned(sth.TreeHeadSignature)
 	if err != nil {
 		return err
@@ -166,11 +172,19 @@ func (c *Client) VerifySTH(sth *STH) error {
 	digest := sha256.Sum256(input)
 	switch key := c.pubKey.(type) {
 	case *ecdsa.PublicKey:
+		// RFC 6962 DigitallySigned must be ecdsa_secp256r1_sha256 (4,3).
+		if ds.HashAlg != 4 || ds.SigAlg != 3 {
+			return fmt.Errorf("sth signature algorithm (%d,%d); want ecdsa+sha256 (4,3)", ds.HashAlg, ds.SigAlg)
+		}
 		if !ecdsa.VerifyASN1(key, digest[:], ds.Sig) {
 			return fmt.Errorf("sth signature verify failed")
 		}
 		return nil
 	case *rsa.PublicKey:
+		// rsa_pkcs1_sha256 is (4,1).
+		if ds.HashAlg != 4 || ds.SigAlg != 1 {
+			return fmt.Errorf("sth signature algorithm (%d,%d); want rsa+sha256 (4,1)", ds.HashAlg, ds.SigAlg)
+		}
 		return rsa.VerifyPKCS1v15(key, crypto.SHA256, digest[:], ds.Sig)
 	default:
 		return fmt.Errorf("unsupported log key type %T", c.pubKey)
@@ -178,8 +192,9 @@ func (c *Client) VerifySTH(sth *STH) error {
 }
 
 type digitallySigned struct {
-	SigAlg byte
-	Sig    []byte
+	HashAlg byte
+	SigAlg  byte
+	Sig     []byte
 }
 
 func decodeDigitallySigned(b []byte) (*digitallySigned, error) {
@@ -190,5 +205,5 @@ func decodeDigitallySigned(b []byte) (*digitallySigned, error) {
 	if len(b) < 4+n {
 		return nil, fmt.Errorf("truncated signature body")
 	}
-	return &digitallySigned{SigAlg: b[1], Sig: b[4 : 4+n]}, nil
+	return &digitallySigned{HashAlg: b[0], SigAlg: b[1], Sig: b[4 : 4+n]}, nil
 }
