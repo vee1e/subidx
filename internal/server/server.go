@@ -1,3 +1,6 @@
+// Package server serves the read-only search API in front of the
+// store, with per-IP rate limiting, Host allow-listing, and bounded
+// result sizes.
 package server
 
 import (

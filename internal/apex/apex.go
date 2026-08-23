@@ -1,3 +1,6 @@
+// Package apex canonicalizes DNS names (IDNA, wildcards, case) and
+// derives the registrable eTLD+1 they belong to using the embedded
+// Public Suffix List.
 package apex
 
 import (

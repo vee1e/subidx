@@ -1,3 +1,6 @@
+// Package tailer watches Certificate Transparency logs: it verifies
+// signed tree heads, binds fetched entries to them via inclusion
+// proofs, and feeds decoded names into the store.
 package tailer
 
 import (

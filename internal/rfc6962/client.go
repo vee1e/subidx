@@ -1,3 +1,6 @@
+// Package rfc6962 implements the RFC 6962 pieces subidx needs: a CT
+// log client with pinned-key signed tree head verification, entry
+// decoding, and Merkle inclusion proof checking.
 package rfc6962
 
 import (

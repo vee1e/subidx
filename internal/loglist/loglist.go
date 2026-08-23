@@ -1,3 +1,6 @@
+// Package loglist fetches and merges the public Certificate
+// Transparency log lists (Chrome's v3 lists and Apple's), normalizing
+// per-log state and endpoints for consumers.
 package loglist
 
 import (

@@ -1,3 +1,6 @@
+// Package store implements the on-disk subdomain index on top of
+// Pebble: a single-writer ingest loop, crash-safe watermarks committed
+// atomically with records, and scan/top queries.
 package store
 
 import (
