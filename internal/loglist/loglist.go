@@ -1,6 +1,7 @@
 package loglist
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -83,7 +84,7 @@ func (l *Log) Endpoint() string {
 	}
 }
 
-func FetchAll(client *http.Client) ([]Log, error) {
+func FetchAll(ctx context.Context, client *http.Client) ([]Log, error) {
 	if client == nil {
 		client = &http.Client{Timeout: 30 * time.Second}
 	}
@@ -92,7 +93,10 @@ func FetchAll(client *http.Client) ([]Log, error) {
 	var order []string
 	var fetched int
 	for _, u := range urls {
-		list, err := fetchOne(client, u)
+		if ctx.Err() != nil {
+			break
+		}
+		list, err := fetchOne(ctx, client, u)
 		if err != nil {
 			continue
 		}
@@ -125,6 +129,9 @@ func FetchAll(client *http.Client) ([]Log, error) {
 		out = append(out, *seen[id])
 	}
 	if fetched == 0 {
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("log list fetch canceled: %w", ctx.Err())
+		}
 		return nil, fmt.Errorf("all %d log list sources failed", len(urls))
 	}
 	if fetched < len(urls) {
@@ -133,8 +140,12 @@ func FetchAll(client *http.Client) ([]Log, error) {
 	return out, nil
 }
 
-func fetchOne(client *http.Client, url string) (*List, error) {
-	resp, err := client.Get(url)
+func fetchOne(ctx context.Context, client *http.Client, url string) (*List, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
