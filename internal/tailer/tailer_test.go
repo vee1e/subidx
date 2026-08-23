@@ -1,6 +1,7 @@
 package tailer
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -16,10 +17,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
 	"subidx/internal/loglist"
+	"subidx/internal/rfc6962"
 	"subidx/internal/store"
 )
 
@@ -27,7 +30,47 @@ type fakeLog struct {
 	entries   [][]byte
 	sthHits   int
 	shortRead bool
+	tamper    bool
 	key       *ecdsa.PrivateKey
+}
+
+// Test-side reference RFC 6962 Merkle tree, so the fake log can serve
+// roots and audit paths that VerifyInclusion must accept.
+func nodeHashT(l, r []byte) []byte {
+	h := sha256.New()
+	h.Write([]byte{0x01})
+	h.Write(l)
+	h.Write(r)
+	return h.Sum(nil)
+}
+
+func rootOfT(leaves [][]byte) []byte {
+	if len(leaves) == 0 {
+		h := sha256.Sum256(nil)
+		return h[:]
+	}
+	if len(leaves) == 1 {
+		return rfc6962.LeafHash(leaves[0])
+	}
+	k := 1
+	for k*2 < len(leaves) {
+		k *= 2
+	}
+	return nodeHashT(rootOfT(leaves[:k]), rootOfT(leaves[k:]))
+}
+
+func pathOfT(leaves [][]byte, idx int) [][]byte {
+	if len(leaves) <= 1 {
+		return nil
+	}
+	k := 1
+	for k*2 < len(leaves) {
+		k *= 2
+	}
+	if idx < k {
+		return append(pathOfT(leaves[:k], idx), rootOfT(leaves[k:]))
+	}
+	return append(pathOfT(leaves[k:], idx-k), rootOfT(leaves[:k]))
 }
 
 func newFakeLog(t *testing.T) *fakeLog {
@@ -84,14 +127,41 @@ func (f *fakeLog) serve(t *testing.T) *httptest.Server {
 		switch r.URL.Path {
 		case "/ct/v1/get-sth":
 			f.sthHits++
-			root := make([]byte, 32)
-			rand.Read(root)
+			root := rootOfT(f.entries)
 			json.NewEncoder(w).Encode(map[string]any{
 				"tree_size":           len(f.entries),
 				"timestamp":           time.Now().UnixMilli(),
 				"sha256_root_hash":    base64.StdEncoding.EncodeToString(root),
 				"tree_head_signature": base64.StdEncoding.EncodeToString(f.signSTH(t, time.Now().UnixMilli(), int64(len(f.entries)), root)),
 			})
+		case "/ct/v1/get-proof-by-hash":
+			hb, err := base64.StdEncoding.DecodeString(r.URL.Query().Get("hash"))
+			if err != nil {
+				http.Error(w, "bad hash", http.StatusBadRequest)
+				return
+			}
+			ts, _ := strconv.ParseInt(r.URL.Query().Get("tree_size"), 10, 64)
+			idx := -1
+			for i := 0; i < len(f.entries) && int64(i) < ts; i++ {
+				if bytes.Equal(rfc6962.LeafHash(f.entries[i]), hb) {
+					idx = i
+					break
+				}
+			}
+			if idx < 0 {
+				http.Error(w, "hash not found", http.StatusNotFound)
+				return
+			}
+			limited := f.entries
+			if int(ts) < len(limited) {
+				limited = limited[:ts]
+			}
+			path := pathOfT(limited, idx)
+			enc := make([]string, len(path))
+			for i, p := range path {
+				enc[i] = base64.StdEncoding.EncodeToString(p)
+			}
+			json.NewEncoder(w).Encode(map[string]any{"leaf_index": idx, "audit_path": enc})
 		case "/ct/v1/get-entries":
 			var start, end int64
 			fmt.Sscanf(r.URL.RawQuery, "start=%d&end=%d", &start, &end)
@@ -107,8 +177,14 @@ func (f *fakeLog) serve(t *testing.T) *httptest.Server {
 				limit = start + (end-start)/2
 			}
 			for i := start; i <= limit; i++ {
+				leaf := f.entries[i]
+				if f.tamper {
+					// Serve bytes that are not committed by the signed
+					// root; every served entry is foreign.
+					leaf = append(bytes.Clone(leaf), 0xFF)
+				}
 				out = append(out, map[string]string{
-					"leaf_input": base64.StdEncoding.EncodeToString(f.entries[i]),
+					"leaf_input": base64.StdEncoding.EncodeToString(leaf),
 					"extra_data": "",
 				})
 			}
@@ -262,5 +338,47 @@ func TestWatermarkErrorSkipsLog(t *testing.T) {
 	tr.Wait()
 	if fl.sthHits != 0 {
 		t.Fatalf("tailer contacted log %d times despite watermark read failure", fl.sthHits)
+	}
+}
+
+func TestTamperedEntriesRejected(t *testing.T) {
+	fl := newFakeLog(t)
+	fl.tamper = true
+	keyB64, logID := fl.keyB64(t)
+	der := makeLeafCert(t, []string{"evil.example.com"})
+	fl.entries = [][]byte{fl.leafInput(der, 1000)}
+	srv := fl.serve(t)
+	defer srv.Close()
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	tr := &Tailer{Store: st, Interval: time.Millisecond, Window: 1}
+	tr.Sync(ctx, []loglist.Log{{
+		LogID: logID,
+		Key:   keyB64,
+		URL:   srv.URL,
+		State: map[string]loglist.StateDetail{"usable": {}},
+	}})
+	// Several poll cycles with every served entry outside the signed
+	// tree: nothing may be ingested and the watermark must not move.
+	time.Sleep(300 * time.Millisecond)
+	cancel()
+	tr.Wait()
+
+	res, err := st.Scan("example.com", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res) != 0 {
+		t.Fatalf("tampered entries ingested: %d records", len(res))
+	}
+	wm, err := st.Watermark(logID)
+	if err != nil || wm != 0 {
+		t.Fatalf("watermark = %d, %v; want 0 — tampered batches must not advance it", wm, err)
 	}
 }

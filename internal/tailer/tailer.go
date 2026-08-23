@@ -2,7 +2,10 @@ package tailer
 
 import (
 	"context"
+	crand "crypto/rand"
+	"fmt"
 	"log"
+	"math/big"
 	"math/rand"
 	"sync"
 	"time"
@@ -123,7 +126,7 @@ func (t *Tailer) tailOne(ctx context.Context, lg loglist.Log, state string) {
 			target = drainTarget
 		}
 		if target > wm {
-			n, err := t.fetchRange(ctx, client, id, wm, target, window)
+			n, err := t.fetchRange(ctx, client, id, wm, target, window, sth.SHA256RootHash, sth.TreeSize)
 			if err != nil && ctx.Err() == nil {
 				log.Printf("tail %s: entries: %v", client.ShortID(), err)
 			}
@@ -142,7 +145,7 @@ func (t *Tailer) tailOne(ctx context.Context, lg loglist.Log, state string) {
 	}
 }
 
-func (t *Tailer) fetchRange(ctx context.Context, client *rfc6962.Client, logID string, from, to, window int64) (int64, error) {
+func (t *Tailer) fetchRange(ctx context.Context, client *rfc6962.Client, logID string, from, to, window int64, root []byte, treeSize int64) (int64, error) {
 	var total int64
 	pos := from
 	for pos < to {
@@ -159,6 +162,15 @@ func (t *Tailer) fetchRange(ctx context.Context, client *rfc6962.Client, logID s
 		}
 		if len(entries) == 0 {
 			return total, nil
+		}
+		// Bind the batch to the signed root before ingesting anything:
+		// a randomly chosen entry must prove inclusion in the verified
+		// tree. Entries served outside the signed tree — by a tampered
+		// connection or a misbehaving log — fail here and are never
+		// stored. The pick is cryptographically random so a tamperer
+		// cannot predict which entry will be checked.
+		if err := spotCheck(ctx, client, entries, root, treeSize); err != nil {
+			return total, fmt.Errorf("inclusion spot-check: %w", err)
 		}
 		skipped := int64(0)
 		for _, e := range entries {
@@ -202,6 +214,24 @@ func (t *Tailer) fetchRange(ctx context.Context, client *rfc6962.Client, logID s
 		pos += n
 	}
 	return total, nil
+}
+
+// spotCheck demands an inclusion proof for one uniformly random entry
+// of a fetched batch and verifies it locally against the signed root.
+func spotCheck(ctx context.Context, client *rfc6962.Client, entries []rfc6962.LeafEntry, root []byte, treeSize int64) error {
+	n, err := crand.Int(crand.Reader, big.NewInt(int64(len(entries))))
+	if err != nil {
+		return fmt.Errorf("pick entry: %w", err)
+	}
+	leafHash := rfc6962.LeafHash(entries[n.Int64()].LeafInput)
+	proof, err := client.ProofByHash(ctx, leafHash, treeSize)
+	if err != nil {
+		return fmt.Errorf("fetch proof: %w", err)
+	}
+	if err := rfc6962.VerifyInclusion(leafHash, proof.LeafIndex, treeSize, proof.AuditPath, root); err != nil {
+		return fmt.Errorf("entry %d of batch not provably in signed tree: %w", n, err)
+	}
+	return nil
 }
 
 func sleepCtx(ctx context.Context, d time.Duration) bool {
