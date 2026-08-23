@@ -15,6 +15,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -112,6 +113,24 @@ func (c *Client) Entries(ctx context.Context, start, end int64) ([]LeafEntry, er
 		return nil, err
 	}
 	return out.Entries, nil
+}
+
+type InclusionProof struct {
+	LeafIndex int64    `json:"leaf_index"`
+	AuditPath [][]byte `json:"audit_path"`
+}
+
+// ProofByHash fetches get-proof-by-hash for leafHash at the given tree
+// size. Verify the result with VerifyInclusion against a signed root.
+func (c *Client) ProofByHash(ctx context.Context, leafHash []byte, treeSize int64) (*InclusionProof, error) {
+	q := url.Values{}
+	q.Set("hash", base64.StdEncoding.EncodeToString(leafHash))
+	q.Set("tree_size", strconv.FormatInt(treeSize, 10))
+	var out InclusionProof
+	if err := c.getJSON(ctx, "/ct/v1/get-proof-by-hash?"+q.Encode(), &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
 }
 
 func (c *Client) getJSON(ctx context.Context, path string, v any) error {
