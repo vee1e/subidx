@@ -37,7 +37,7 @@ func (t *Tailer) Sync(ctx context.Context, logs []loglist.Log) {
 			continue
 		}
 		state := lg.CurrentState()
-		if !t.Drain && (state == "readonly" || state == "retired" || state == "rejected") {
+		if !t.Drain && (state == "readonly" || state == "frozen" || state == "retired" || state == "rejected") {
 			continue
 		}
 		if t.started[lg.LogID] {
@@ -77,8 +77,8 @@ func (t *Tailer) tailOne(ctx context.Context, lg loglist.Log, state string) {
 	}
 	drainTarget := int64(-1)
 	switch state {
-	case "readonly":
-		if d := lg.State["readonly"]; d.FinalTreeHead != nil {
+	case "readonly", "frozen":
+		if d := lg.State[state]; d.FinalTreeHead != nil {
 			drainTarget = d.FinalTreeHead.TreeSize
 		}
 	case "retired", "rejected":

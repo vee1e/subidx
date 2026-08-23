@@ -39,3 +39,30 @@ func TestFetchOneRejectsBadStatus(t *testing.T) {
 		t.Fatal("fetchOne should fail on 500")
 	}
 }
+
+func TestCurrentStateRecognizesFrozen(t *testing.T) {
+	lg := &Log{State: map[string]StateDetail{"frozen": {}}}
+	if got := lg.CurrentState(); got != "frozen" {
+		t.Fatalf("CurrentState() = %q; want frozen", got)
+	}
+}
+
+func TestCurrentStatePriority(t *testing.T) {
+	cases := []struct {
+		states map[string]StateDetail
+		want   string
+	}{
+		{map[string]StateDetail{"usable": {}, "retired": {}}, "usable"},
+		{map[string]StateDetail{"qualified": {}, "pending": {}}, "qualified"},
+		{map[string]StateDetail{"frozen": {}, "readonly": {}}, "frozen"},
+		{map[string]StateDetail{"readonly": {}, "rejected": {}}, "readonly"},
+		{map[string]StateDetail{"rejected": {}}, "rejected"},
+		{map[string]StateDetail{"weird-state": {}}, ""},
+	}
+	for _, c := range cases {
+		lg := &Log{State: c.states}
+		if got := lg.CurrentState(); got != c.want {
+			t.Errorf("CurrentState(%v) = %q; want %q", c.states, got, c.want)
+		}
+	}
+}

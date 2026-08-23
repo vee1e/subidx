@@ -47,7 +47,10 @@ type FinalTreeHead struct {
 	Timestamp      int64  `json:"timestamp"`
 }
 
-var statePriority = []string{"usable", "qualified", "pending", "readonly", "retired", "rejected"}
+// Order per the log list v3 schema. "frozen" logs have stopped appending
+// but remain readable and expose a final_tree_head, so they behave like
+// readonly for draining purposes.
+var statePriority = []string{"usable", "qualified", "pending", "frozen", "readonly", "retired", "rejected"}
 
 func (l *Log) CurrentState() string {
 	best := ""
