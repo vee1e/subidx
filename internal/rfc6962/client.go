@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -35,7 +36,9 @@ type Client struct {
 }
 
 func NewClient(baseURL, keyB64 string) (*Client, error) {
-	c := &Client{BaseURL: baseURL, HTTP: &http.Client{Timeout: 30 * time.Second}}
+	// Log list URLs are joined with "/ct/v1/..." paths below; a trailing
+	// slash would produce "//ct/v1/..." and every request would 404.
+	c := &Client{BaseURL: strings.TrimRight(baseURL, "/"), HTTP: &http.Client{Timeout: 30 * time.Second}}
 	if keyB64 == "" {
 		return nil, fmt.Errorf("missing log key")
 	}
