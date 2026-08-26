@@ -18,6 +18,14 @@ curl "http://localhost:8099/v1/search?apex=letsencrypt.org"
 
 or open `http://localhost:8099/` for the dashboard: search any apex, filter and sort results instantly, toggle first-seen dates, export txt/csv, and watch a live feed of newly collected names. The UI is compiled into the binary; there is nothing extra to deploy.
 
+## What gets stored
+
+| Field | Meaning |
+|---|---|
+| `apex` | registered domain, e.g. `example.com` |
+| `sub` | full subdomain, kept whole (`ap.www.sandbox.namecheap.com` is one record under `namecheap.com`) |
+| `first_seen` | earliest date it appeared in any watched log |
+
 ## Why not just use subfinder?
 
 Tools like [subfinder](https://github.com/projectdiscovery/subfinder) query other people's services at run time and inherit their quotas, captchas, and blind spots, and every run starts from zero. subidx pulls from the source once and owns the index:
@@ -90,16 +98,4 @@ Live dashboards get two more endpoints:
 
 Also: `/v1/stats` (`{"total":N,"top":[...]}`, optional `&n=`, cached, top-k bounded), `/healthz`, `/readyz`. Health endpoints skip the rate limit; everything else is counted.
 
-## Deploying
 
-No external database, ever: storage is an embedded Pebble directory on a persistent disk.
-
-- **One Render service** (simplest). The repo ships `Dockerfile` + `render.yaml`: create a Blueprint, attach the 5 GB disk, done. The dashboard is inside the binary, so UI and API share the origin. Starter plan, ~$7/mo. A live instance runs at [subidx.onrender.com](https://subidx.onrender.com).
-- **Vercel frontend + Render API.** Deploy `internal/web` to Vercel as a Vite project and set env `VITE_API_BASE=https://your-service.onrender.com`. Set the Render env `CORS_ORIGINS=https://your-dashboard.vercel.app` so the browser may call the API cross-origin (Render auto-redeploys on env changes). Live: [subidx.lverma.com](https://subidx.lverma.com) fronting the Render instance above.
-- **Zero cost.** Run it at home and put it on your Tailnet.
-
-Both paths auto-deploy on push to `main`. The API has no auth, so treat a public URL as a semi-private link.
-
-## What gets stored
-
-Three facts per name: the apex (registered domain), the full subdomain, and `first_seen`, the earliest date it appeared in any watched log. Multi-level names are kept whole, so `ap.www.sandbox.namecheap.com` is one record under `namecheap.com`.
