@@ -237,6 +237,9 @@ func TestCORS(t *testing.T) {
 	if v := rec.Header().Get("Vary"); !strings.Contains(v, "Origin") {
 		t.Errorf("Vary = %q", v)
 	}
+	if ex := rec.Header().Get("Access-Control-Expose-Headers"); !strings.Contains(ex, "x-ratelimit-limit") || !strings.Contains(ex, "x-max-seq") {
+		t.Errorf("expose-headers = %q", ex)
+	}
 
 	bad := httptest.NewRequest("GET", "/v1/stats", nil)
 	bad.Host = "localhost"
