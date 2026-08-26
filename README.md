@@ -29,7 +29,7 @@ Tools like [subfinder](https://github.com/projectdiscovery/subfinder) query othe
 - **Historical drains.** Years of history from retired logs can be backfilled, if you have the terabytes.
 - **An API and dashboard, not just a CLI.** Pipe results into your tooling or browse them.
 
-Honest limit: CT only sees names that were issued a certificate. Names that live only in DNS are invisible here, which is why subidx complements rather than replaces broader-source tools.
+Limitations: CT only sees names that were issued a certificate. Names that live only in DNS are invisible here, which is why subidx complements rather than replaces broader-source tools.
 
 ## How it works
 
