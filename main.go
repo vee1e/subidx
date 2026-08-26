@@ -99,9 +99,11 @@ func cmdServe(args []string) error {
 	c := addCommon(fs)
 	addr := fs.String("addr", "127.0.0.1:8080", "listen address")
 	noTail := fs.Bool("no-tail", false, "disable CT tailers")
+	noDrain := fs.Bool("no-drain", false, "skip readonly/retired/rejected log drains")
 	rateLimit := fs.Int64("rate-limit", 1000, "requests per rolling 24h per IP")
 	maxResults := fs.Int("max-results", store.DefaultScanLimit, "max results buffered per search query")
 	allowedHosts := fs.String("allowed-hosts", "", "comma-separated Host values to accept (default: localhost, 127.0.0.1, ::1)")
+	corsOrigins := fs.String("cors-origins", "", "comma-separated browser origins allowed to call the API (e.g. https://you.vercel.app)")
 	trustedHops := fs.Int("trusted-proxy-hops", 0, "trusted proxies in front (0 = ignore X-Forwarded-For)")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -122,7 +124,7 @@ func cmdServe(args []string) error {
 	if !*noTail {
 		go func() {
 			defer close(tailerDone)
-			runTailers(ctx, st, c, true)
+			runTailers(ctx, st, c, !*noDrain)
 		}()
 	}
 
@@ -132,6 +134,18 @@ func cmdServe(args []string) error {
 			hosts = append(hosts, h)
 		}
 	}
+	var origins []string
+	for _, o := range strings.Split(*corsOrigins, ",") {
+		if o = strings.TrimSpace(o); o != "" {
+			origins = append(origins, o)
+		}
+	}
+
+	hub := server.NewHub()
+	st.OnNew = func(r store.Record) {
+		hub.Broadcast(server.FeedEvent{Apex: r.Apex, Sub: r.Sub, FirstSeen: r.FirstSeen, Seq: r.Seq})
+	}
+	stop := make(chan struct{})
 
 	srv := &server.Server{
 		Store:        st,
@@ -140,6 +154,9 @@ func cmdServe(args []string) error {
 		RateLimit:    *rateLimit,
 		MaxResults:   *maxResults,
 		AllowedHosts: hosts,
+		CORSOrigins:  origins,
+		Hub:          hub,
+		Stop:         stop,
 		ReadyFn: func() bool {
 			_, err := st.Total()
 			return err == nil
@@ -170,6 +187,8 @@ func cmdServe(args []string) error {
 	case s := <-sig:
 		log.Printf("received %s, shutting down", s)
 	}
+	close(stop)
+	hub.Close()
 	shutdownCtx, sc := context.WithTimeout(context.Background(), 30*time.Second)
 	defer sc()
 	httpSrv.Shutdown(shutdownCtx)

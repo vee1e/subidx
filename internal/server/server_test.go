@@ -1,6 +1,7 @@
 package server
 
 import (
+	"compress/gzip"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -148,6 +149,125 @@ func TestSearchDatesText(t *testing.T) {
 	}
 }
 
+func TestSearchNDJSON(t *testing.T) {
+	s, _ := newTestServer(t, 0)
+	rec := do(t, s, "GET", "/v1/search?apex=example.com&format=ndjson&dates=1")
+	if rec.Code != 200 {
+		t.Fatalf("code = %d", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "application/x-ndjson" {
+		t.Errorf("content-type = %q", ct)
+	}
+	if tc := rec.Header().Get("x-total-count"); tc != "3" {
+		t.Errorf("x-total-count = %q", tc)
+	}
+	lines := strings.Split(strings.TrimSpace(rec.Body.String()), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("lines = %d, want 3", len(lines))
+	}
+	var first struct {
+		FirstSeen string `json:"first_seen"`
+		Sub       string `json:"sub"`
+	}
+	if err := json.Unmarshal([]byte(lines[0]), &first); err != nil {
+		t.Fatal(err)
+	}
+	if first.Sub != "example.com" || first.FirstSeen == "" {
+		t.Errorf("first line = %+v", first)
+	}
+}
+
+func TestSearchGzip(t *testing.T) {
+	s, _ := newTestServer(t, 0)
+
+	plain := do(t, s, "GET", "/v1/search?apex=example.com")
+
+	req := httptest.NewRequest("GET", "/v1/search?apex=example.com", nil)
+	req.Host = "localhost"
+	req.Header.Set("Accept-Encoding", "gzip")
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("code = %d", rec.Code)
+	}
+	if enc := rec.Header().Get("Content-Encoding"); enc != "gzip" {
+		t.Fatalf("content-encoding = %q", enc)
+	}
+	zr, err := gzip.NewReader(rec.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := io.ReadAll(zr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != plain.Body.String() {
+		t.Errorf("gzipped body mismatch")
+	}
+
+	sreq := httptest.NewRequest("GET", "/v1/stats", nil)
+	sreq.Host = "localhost"
+	sreq.Header.Set("Accept-Encoding", "gzip")
+	srec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(srec, sreq)
+	if srec.Header().Get("Content-Encoding") != "gzip" {
+		t.Error("stats not gzipped")
+	}
+	zr2, err := gzip.NewReader(srec.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.ReadAll(zr2); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCORS(t *testing.T) {
+	s, _ := newTestServer(t, 0)
+	s.CORSOrigins = []string{"https://dash.example.vercel"}
+
+	req := httptest.NewRequest("GET", "/v1/stats", nil)
+	req.Host = "localhost"
+	req.Header.Set("Origin", "https://dash.example.vercel")
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "https://dash.example.vercel" {
+		t.Errorf("allowed origin got %q", got)
+	}
+	if v := rec.Header().Get("Vary"); !strings.Contains(v, "Origin") {
+		t.Errorf("Vary = %q", v)
+	}
+
+	bad := httptest.NewRequest("GET", "/v1/stats", nil)
+	bad.Host = "localhost"
+	bad.Header.Set("Origin", "https://evil.example.com")
+	rec2 := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec2, bad)
+	if got := rec2.Header().Get("Access-Control-Allow-Origin"); got != "" {
+		t.Errorf("foreign origin got %q", got)
+	}
+
+	pre := httptest.NewRequest("OPTIONS", "/v1/stats", nil)
+	pre.Host = "localhost"
+	pre.Header.Set("Origin", "https://dash.example.vercel")
+	pre.Header.Set("Access-Control-Request-Method", "GET")
+	rec3 := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec3, pre)
+	if rec3.Code != http.StatusNoContent {
+		t.Errorf("preflight code = %d", rec3.Code)
+	}
+
+	off, _ := newTestServer(t, 0)
+	plain := httptest.NewRequest("GET", "/v1/stats", nil)
+	plain.Host = "localhost"
+	plain.Header.Set("Origin", "https://dash.example.vercel")
+	rec4 := httptest.NewRecorder()
+	off.Handler().ServeHTTP(rec4, plain)
+	if got := rec4.Header().Get("Access-Control-Allow-Origin"); got != "" {
+		t.Errorf("CORS active with no origins configured: %q", got)
+	}
+}
+
 func TestHeadNotAllowed(t *testing.T) {
 	s, _ := newTestServer(t, 0)
 	rec := do(t, s, http.MethodHead, "/v1/search?apex=example.com")
@@ -158,9 +278,51 @@ func TestHeadNotAllowed(t *testing.T) {
 	if po.Code != http.StatusMethodNotAllowed {
 		t.Errorf("post code = %d", po.Code)
 	}
+	// Unknown paths serve the embedded UI shell instead of a bare 404.
 	nf := do(t, s, http.MethodGet, "/nope")
-	if nf.Code != http.StatusNotFound {
-		t.Errorf("404 code = %d", nf.Code)
+	if nf.Code != http.StatusOK || !strings.Contains(nf.Header().Get("Content-Type"), "text/html") {
+		t.Errorf("ui shell code = %d ct = %q", nf.Code, nf.Header().Get("Content-Type"))
+	}
+}
+
+func TestStatsEndpoint(t *testing.T) {
+	s, _ := newTestServer(t, 0)
+	rec := do(t, s, http.MethodGet, "/v1/stats")
+	if rec.Code != 200 {
+		t.Fatalf("code = %d", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
+		t.Errorf("content-type = %q", ct)
+	}
+	var out struct {
+		Total uint64 `json:"total"`
+		Top   []struct {
+			Apex  string `json:"apex"`
+			Count uint64 `json:"count"`
+		} `json:"top"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Total != 3 || len(out.Top) != 1 || out.Top[0].Apex != "example.com" || out.Top[0].Count != 3 {
+		t.Errorf("stats = %+v", out)
+	}
+
+	rec1 := do(t, s, http.MethodGet, "/v1/stats?n=1")
+	if err := json.Unmarshal(rec1.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Top) != 1 {
+		t.Errorf("n=1 gave %d entries", len(out.Top))
+	}
+
+	bad := do(t, s, http.MethodGet, "/v1/stats?n=zero")
+	if bad.Code != 400 {
+		t.Errorf("bad n code = %d", bad.Code)
+	}
+	post := do(t, s, http.MethodPost, "/v1/stats")
+	if post.Code != http.StatusMethodNotAllowed {
+		t.Errorf("post stats code = %d", post.Code)
 	}
 }
 

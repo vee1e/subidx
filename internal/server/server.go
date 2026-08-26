@@ -10,10 +10,13 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"subidx/internal/apex"
 	"subidx/internal/store"
+	"subidx/internal/web"
 )
 
 type Server struct {
@@ -24,6 +27,26 @@ type Server struct {
 	MaxResults   int
 	AllowedHosts []string
 	ReadyFn      func() bool
+
+	// Hub fans ingest events out to /v1/feed subscribers; nil disables
+	// the endpoint. Stop, when closed, tears active streams down quickly
+	// so Shutdown is not stuck waiting on them. CORSOrigins, when set,
+	// lets separately hosted frontends call the API from the browser.
+	Hub         *Hub
+	Stop        chan struct{}
+	CORSOrigins []string
+	activeFeeds atomic.Int64
+
+	statsMu    sync.Mutex
+	statsCache map[int]statsCacheEntry
+}
+
+// statsCacheTTL bounds how stale dashboard stats may be.
+const statsCacheTTL = 15 * time.Second
+
+type statsCacheEntry struct {
+	body []byte
+	at   time.Time
 }
 
 var defaultHosts = []string{"localhost", "127.0.0.1", "::1"}
@@ -52,9 +75,12 @@ func (s *Server) hostAllowed(host string) bool {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/search", s.handleSearch)
+	mux.HandleFunc("/v1/stats", s.handleStats)
+	mux.HandleFunc("/v1/watch", s.handleWatch)
+	mux.HandleFunc("/v1/feed", s.handleFeed)
 	mux.HandleFunc("/healthz", s.handleHealth)
 	mux.HandleFunc("/readyz", s.handleReady)
-	mux.HandleFunc("/", s.handleRoot)
+	mux.Handle("/", web.Handler())
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !s.hostAllowed(r.Host) {
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -62,18 +88,28 @@ func (s *Server) Handler() http.Handler {
 			w.Write([]byte("unrecognized host\n"))
 			return
 		}
-		mux.ServeHTTP(w, r)
+		corsMiddleware(s.CORSOrigins, gzipMiddleware(mux)).ServeHTTP(w, r)
 	})
 }
 
-func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path == "/v1/search" || r.URL.Path == "/healthz" || r.URL.Path == "/readyz" {
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		w.WriteHeader(http.StatusMethodNotAllowed)
-		w.Write([]byte("Method Not Allowed\n"))
-		return
+// gate applies the per-IP rate limit and writes the limit headers. It
+// returns false when the request was already answered with a 429.
+func (s *Server) gate(w http.ResponseWriter, r *http.Request) bool {
+	if s.Limiter == nil {
+		return true
 	}
-	http.NotFound(w, r)
+	key := ClientKey(r, s.TrustedHops)
+	rem, ok, retryAfter := s.Limiter.Allow(key)
+	w.Header().Set("x-ratelimit-limit", strconv.FormatInt(s.RateLimit, 10))
+	w.Header().Set("x-ratelimit-remaining", strconv.FormatInt(rem, 10))
+	if !ok {
+		w.Header().Set("Retry-After", fmtRetry(retryAfter))
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(http.StatusTooManyRequests)
+		w.Write([]byte("rate limit exceeded\n"))
+		return false
+	}
+	return true
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -103,18 +139,8 @@ func (s *Server) methodNotAllowed(w http.ResponseWriter) {
 }
 
 func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
-	key := ClientKey(r, s.TrustedHops)
-	if s.Limiter != nil {
-		rem, ok, retryAfter := s.Limiter.Allow(key)
-		w.Header().Set("x-ratelimit-limit", strconv.FormatInt(s.RateLimit, 10))
-		w.Header().Set("x-ratelimit-remaining", strconv.FormatInt(rem, 10))
-		if !ok {
-			w.Header().Set("Retry-After", fmtRetry(retryAfter))
-			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-			w.WriteHeader(http.StatusTooManyRequests)
-			w.Write([]byte("rate limit exceeded\n"))
-			return
-		}
+	if !s.gate(w, r) {
+		return
 	}
 
 	if r.Method != http.MethodGet {
@@ -144,15 +170,111 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
+	if c, err := s.Store.Count(a); err == nil {
+		w.Header().Set("x-total-count", strconv.FormatUint(c, 10))
+	}
+	if len(results) > 0 {
+		// Scan output is seq-ascending even when capped, so the last row
+		// carries the apex's newest sequence number.
+		w.Header().Set("x-max-seq", strconv.FormatUint(results[len(results)-1].Seq, 10))
+	}
 
 	dates := r.URL.Query().Get("dates") == "1"
-	jsonMode := r.URL.Query().Get("format") == "json"
-
-	if jsonMode {
+	switch {
+	case r.URL.Query().Get("format") == "json":
 		s.renderJSON(w, results, dates)
+	case r.URL.Query().Get("format") == "ndjson":
+		s.renderNDJSON(w, results, dates)
+	default:
+		s.renderText(w, results, dates)
+	}
+}
+
+// maxStatsTop caps the ?n= parameter on /v1/stats.
+const maxStatsTop = 100
+
+// topIterCap bounds how many apex counters a stats request will inspect.
+// Beyond it the top list approximates "busiest of the first 250k apexes"
+// rather than scanning millions of counters per page load.
+const topIterCap = 250_000
+
+type jsonTop struct {
+	Apex  string `json:"apex"`
+	Count uint64 `json:"count"`
+}
+
+type jsonStats struct {
+	Total uint64    `json:"total"`
+	Top   []jsonTop `json:"top"`
+}
+
+func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
+	if !s.gate(w, r) {
 		return
 	}
-	s.renderText(w, results, dates)
+	if r.Method != http.MethodGet {
+		s.methodNotAllowed(w)
+		return
+	}
+
+	n := 10
+	if raw := r.URL.Query().Get("n"); raw != "" {
+		v, err := strconv.Atoi(raw)
+		if err != nil || v < 1 {
+			http.Error(w, "invalid n", http.StatusBadRequest)
+			return
+		}
+		if v > maxStatsTop {
+			v = maxStatsTop
+		}
+		n = v
+	}
+
+	s.statsMu.Lock()
+	body, cached := s.statsCache[n].body, false
+	if e, ok := s.statsCache[n]; ok && time.Since(e.at) < statsCacheTTL {
+		body, cached = e.body, true
+	}
+	s.statsMu.Unlock()
+	if cached {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(body)
+		return
+	}
+
+	total, err := s.Store.Total()
+	if err != nil {
+		log.Printf("stats total: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	top, err := s.Store.TopApprox(n, topIterCap)
+	if err != nil {
+		log.Printf("stats top: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	out := jsonStats{Total: total, Top: make([]jsonTop, 0, len(top))}
+	for _, ac := range top {
+		out.Top = append(out.Top, jsonTop{Apex: ac.Apex, Count: ac.Count})
+	}
+	body, err = json.Marshal(out)
+	if err != nil {
+		log.Printf("stats marshal: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	s.statsMu.Lock()
+	if s.statsCache == nil {
+		s.statsCache = make(map[int]statsCacheEntry)
+	}
+	s.statsCache[n] = statsCacheEntry{body: body, at: time.Now()}
+	s.statsMu.Unlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(body)
 }
 
 func (s *Server) renderText(w http.ResponseWriter, results []store.Result, dates bool) {
@@ -200,6 +322,35 @@ func (s *Server) renderJSON(w http.ResponseWriter, results []store.Result, dates
 		out = append(out, jsonSub{Sub: r.Sub})
 	}
 	enc.Encode(out)
+}
+
+// renderNDJSON streams one JSON object per line and flushes early and
+// often, so clients can render rows as they arrive instead of waiting
+// for a multi-megabyte response to finish.
+func (s *Server) renderNDJSON(w http.ResponseWriter, results []store.Result, dates bool) {
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	enc := json.NewEncoder(w)
+	enc.SetEscapeHTML(false)
+	flusher, _ := w.(http.Flusher)
+	for i, r := range results {
+		if dates {
+			rec := jsonSubDate{Sub: r.Sub}
+			if r.FirstSeen > 0 {
+				ts := formatTS(r.FirstSeen)
+				rec.FirstSeen = &ts
+			}
+			if err := enc.Encode(rec); err != nil {
+				return
+			}
+		} else {
+			if err := enc.Encode(jsonSub{Sub: r.Sub}); err != nil {
+				return
+			}
+		}
+		if flusher != nil && (i == 0 || i&1023 == 1023) {
+			flusher.Flush()
+		}
+	}
 }
 
 func formatTS(ms int64) string {

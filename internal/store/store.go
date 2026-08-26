@@ -8,7 +8,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"log"
-	"sort"
 	"sync"
 	"time"
 
@@ -20,6 +19,9 @@ type Record struct {
 	Sub       string
 	FirstSeen int64
 	Source    byte
+	// Seq is filled in only by the OnNew hook (see below); ingest callers
+	// leave it zero and the store assigns sequence numbers itself.
+	Seq uint64
 }
 
 type Result struct {
@@ -43,10 +45,18 @@ var errStoreClosed = fmt.Errorf("store closed")
 type Store struct {
 	db     *pebble.DB
 	ch     chan ingestOp
+	quit   chan struct{}
 	done   chan struct{}
 	seq    uint64
 	mu     sync.Mutex
 	closed bool
+
+	// OnNew, when set, is called from the ingest loop for every newly
+	// stored name, just before the surrounding batch commits. A crash
+	// between the call and the commit can lose that record, which is
+	// acceptable for ephemeral notification consumers (the live feed);
+	// it must not block or panic.
+	OnNew func(r Record)
 
 	pendingRecords map[string]*recState
 	pendingCounts  map[string]uint64
@@ -76,6 +86,7 @@ func Open(dir string) (*Store, error) {
 	s := &Store{
 		db:             db,
 		ch:             make(chan ingestOp, 4096),
+		quit:           make(chan struct{}),
 		done:           make(chan struct{}),
 		pendingRecords: make(map[string]*recState),
 		pendingCounts:  make(map[string]uint64),
@@ -124,39 +135,51 @@ func (s *Store) ingestLoop() {
 		batch.Reset()
 		return nil
 	}
+	handle := func(op ingestOp) {
+		if op.rec == nil && op.recount == nil {
+			if cur, ok := s.wmHigh[op.logID]; !ok || op.wm > cur {
+				s.wmHigh[op.logID] = op.wm
+				s.pendingWM[op.logID] = op.wm
+			}
+			return
+		}
+		if op.recount != nil {
+			total, err := s.recountInLoop(flush, batch)
+			op.recount <- recountResult{total: total, err: err}
+			return
+		}
+		if err := s.apply(batch, *op.rec); err != nil {
+			log.Printf("store apply %s/%s: %v", op.rec.Apex, op.rec.Sub, err)
+			return
+		}
+		s.seq++
+		pending++
+		if pending >= 512 {
+			if err := flush(); err != nil {
+				log.Printf("store flush: %v", err)
+			}
+			pending = 0
+		}
+	}
 	for {
 		select {
-		case op, ok := <-s.ch:
-			if !ok {
-				if err := flush(); err != nil {
-					log.Printf("store final flush: %v", err)
+		case <-s.quit:
+			// Drain whatever is already queued so a shutdown loses no
+			// accepted writes, then flush and stop. The channel is never
+			// closed; late senders are turned away by the closed flag.
+			for {
+				select {
+				case op := <-s.ch:
+					handle(op)
+				default:
+					if err := flush(); err != nil {
+						log.Printf("store final flush: %v", err)
+					}
+					return
 				}
-				return
 			}
-			if op.rec == nil && op.recount == nil {
-				if cur, ok := s.wmHigh[op.logID]; !ok || op.wm > cur {
-					s.wmHigh[op.logID] = op.wm
-					s.pendingWM[op.logID] = op.wm
-				}
-				continue
-			}
-			if op.recount != nil {
-				total, err := s.recountInLoop(flush, batch)
-				op.recount <- recountResult{total: total, err: err}
-				continue
-			}
-			if err := s.apply(batch, *op.rec); err != nil {
-				log.Printf("store apply %s/%s: %v", op.rec.Apex, op.rec.Sub, err)
-				continue
-			}
-			s.seq++
-			pending++
-			if pending >= 512 {
-				if err := flush(); err != nil {
-					log.Printf("store flush: %v", err)
-				}
-				pending = 0
-			}
+		case op := <-s.ch:
+			handle(op)
 		case <-time.After(20 * time.Millisecond):
 			if pending > 0 || len(s.pendingWM) > 0 {
 				if err := flush(); err != nil {
@@ -217,6 +240,9 @@ func (s *Store) apply(batch *pebble.Batch, r Record) error {
 		binary.BigEndian.PutUint64(totBuf[:], s.totalBase+s.pendingTotal)
 		if err := batch.Set(totalKey(), totBuf[:], nil); err != nil {
 			return err
+		}
+		if s.OnNew != nil {
+			s.OnNew(Record{Apex: r.Apex, Sub: r.Sub, FirstSeen: ns.firstSeen, Source: ns.source, Seq: ns.seq})
 		}
 		return nil
 	}
@@ -308,6 +334,49 @@ func (s *Store) Scan(apex string, limit int) ([]Result, error) {
 	return out, it.Error()
 }
 
+// ScanAfter returns the apex's records whose Seq is greater than after,
+// plus the largest Seq found for the apex (even when nothing matched).
+// Rows come back in key order, not seq order, and are capped at limit;
+// truncated reports whether the cap cut any matches. It exists so watch
+// clients can poll a cheap "what changed since cursor N".
+func (s *Store) ScanAfter(apex string, after uint64, limit int) (rows []Result, maxSeq uint64, truncated bool, err error) {
+	if limit <= 0 {
+		limit = DefaultScanLimit
+	}
+	lo := []byte(recordKey(apex, ""))
+	hi := make([]byte, len(apex)+1)
+	copy(hi, apex)
+	hi[len(apex)] = 0x01
+	it, err := s.db.NewIter(&pebble.IterOptions{LowerBound: lo, UpperBound: hi})
+	if err != nil {
+		return nil, 0, false, err
+	}
+	defer it.Close()
+	for ok := it.First(); ok; ok = it.Next() {
+		v := it.Value()
+		if len(v) < 17 {
+			continue
+		}
+		seq := binary.BigEndian.Uint64(v[9:17])
+		if seq > maxSeq {
+			maxSeq = seq
+		}
+		if seq <= after {
+			continue
+		}
+		if len(rows) >= limit {
+			truncated = true
+			continue
+		}
+		rows = append(rows, Result{
+			Sub:       string(it.Key()[len(lo):]),
+			FirstSeen: int64(binary.BigEndian.Uint64(v[:8])),
+			Seq:       seq,
+		})
+	}
+	return rows, maxSeq, truncated, it.Error()
+}
+
 func (s *Store) Count(apex string) (uint64, error) {
 	v, err := s.getRaw(countKey(apex))
 	if err != nil {
@@ -328,6 +397,28 @@ func (s *Store) Total() (uint64, error) {
 }
 
 func (s *Store) Top(n int) ([]ApexCount, error) {
+	return s.top(n, 0)
+}
+
+// TopApprox is Top, but stops after inspecting maxIter apex counters and
+// returns the busiest among those. Exact while the store has fewer than
+// maxIter apexes; a bounded approximation beyond that.
+func (s *Store) TopApprox(n, maxIter int) ([]ApexCount, error) {
+	if maxIter <= 0 {
+		return nil, fmt.Errorf("invalid maxIter")
+	}
+	return s.top(n, maxIter)
+}
+
+type countHeap []ApexCount
+
+func (h countHeap) Len() int           { return len(h) }
+func (h countHeap) Less(i, j int) bool { return h[i].Count < h[j].Count }
+func (h countHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *countHeap) Push(x any)        { *h = append(*h, x.(ApexCount)) }
+func (h *countHeap) Pop() any          { old := *h; n := len(old); x := old[n-1]; *h = old[:n-1]; return x }
+
+func (s *Store) top(n, maxIter int) ([]ApexCount, error) {
 	lo := []byte{pfxCount}
 	hi := []byte{pfxCount + 1}
 	it, err := s.db.NewIter(&pebble.IterOptions{LowerBound: lo, UpperBound: hi})
@@ -335,19 +426,36 @@ func (s *Store) Top(n int) ([]ApexCount, error) {
 		return nil, err
 	}
 	defer it.Close()
-	all := make([]ApexCount, 0, 1024)
+	h := &countHeap{}
+	iterated := 0
 	for ok := it.First(); ok; ok = it.Next() {
-		n, ok := beUint64(it.Value())
+		iterated++
+		if maxIter > 0 && iterated > maxIter {
+			break
+		}
+		c, ok := beUint64(it.Value())
 		if !ok {
 			continue
 		}
-		all = append(all, ApexCount{Apex: string(it.Key()[1:]), Count: n})
+		ac := ApexCount{Apex: string(it.Key()[1:]), Count: c}
+		if h.Len() < n {
+			heap.Push(h, ac)
+		} else if c > (*h)[0].Count {
+			(*h)[0] = ac
+			heap.Fix(h, 0)
+		}
 	}
-	sort.Slice(all, func(i, j int) bool { return all[i].Count > all[j].Count })
-	if len(all) > n {
-		all = all[:n]
+	if err := it.Error(); err != nil {
+		return nil, err
 	}
-	return all, it.Error()
+	out := make([]ApexCount, h.Len())
+	for i := range out {
+		out[i] = heap.Pop(h).(ApexCount)
+	}
+	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+		out[i], out[j] = out[j], out[i]
+	}
+	return out, nil
 }
 
 func (s *Store) Watermark(logID string) (int64, error) {
@@ -374,7 +482,7 @@ func (s *Store) Close() error {
 	}
 	s.closed = true
 	s.mu.Unlock()
-	close(s.ch)
+	close(s.quit)
 	<-s.done
 	return s.db.Close()
 }
@@ -398,13 +506,22 @@ func (s *Store) Recount() (uint64, error) {
 }
 
 func (s *Store) sendOp(op ingestOp) error {
+	// Check closed under the mutex, but never send while holding it: the
+	// channel can be full when ingest is saturated, and a blocking send
+	// under mu would stall every read that needs the mutex (Total, Count,
+	// Watermark) behind the write backlog.
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
+	closed := s.closed
+	s.mu.Unlock()
+	if closed {
 		return errStoreClosed
 	}
-	s.ch <- op
-	return nil
+	select {
+	case s.ch <- op:
+		return nil
+	case <-s.quit:
+		return errStoreClosed
+	}
 }
 
 func (s *Store) recountInLoop(flush func() error, batch *pebble.Batch) (uint64, error) {
