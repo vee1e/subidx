@@ -31,8 +31,6 @@ Tools like [subfinder](https://github.com/projectdiscovery/subfinder) query othe
 
 Honest limit: CT only sees names that were issued a certificate. Names that live only in DNS are invisible here, which is why subidx complements rather than replaces broader-source tools.
 
-A similar project exists, [subfaster](https://github.com/melvinsh/subfaster); subidx was built before its author knew of it. The two share no code and differ in approach: subfaster queries other people's services at run time, subidx tails the CT logs itself. Convergent evolution, not copying.
-
 ## How it works
 
 1. **Discovery.** Every hour, subidx fetches Chrome's log lists (plus Apple's) and merges them. Live logs are tailed; old and rejected logs hold the drainable history (`-no-drain` to skip).
