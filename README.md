@@ -85,8 +85,8 @@ Search responses carry `x-total-count` (names in the index for the apex) and `x-
 
 Live dashboards get two more endpoints:
 
-- `GET /v1/watch?apex=X&after=N` — NDJSON of names collected since sequence `N`, with `x-max-seq` and `x-truncated`. A cheap "what changed" poll.
-- `GET /v1/feed?apex=X` — server-sent-event stream of new names for that apex, one rate-budget unit per session. Slow consumers get a `resync` event instead of silent gaps.
+- `GET /v1/watch?apex=X&after=N`, NDJSON of names collected since sequence `N`, with `x-max-seq` and `x-truncated`. A cheap "what changed" poll.
+- `GET /v1/feed?apex=X`, server-sent-event stream of new names for that apex, one rate-budget unit per session. Slow consumers get a `resync` event instead of silent gaps.
 
 Also: `/v1/stats` (`{"total":N,"top":[...]}`, optional `&n=`, cached, top-k bounded), `/healthz`, `/readyz`. Health endpoints skip the rate limit; everything else is counted.
 
