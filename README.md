@@ -1,86 +1,54 @@
 # subidx
 
-subidx is a self-hosted passive subdomain enumeration tool for recon and attack-surface mapping. It tails public Certificate Transparency logs (public records of every HTTPS certificate issued), indexes every hostname it sees, and serves them through a search API you control. Think crt.name, but the data lives on your machine and answers to nobody else's rate limits.
+Self-hosted passive subdomain enumeration from Certificate Transparency. subidx tails public CT logs (the records of every HTTPS certificate issued), indexes every hostname it sees, and serves them through a search API and dashboard you control. Think crt.name, but the data lives on your machine.
 
-## Why not just use subfinder?
-
-Tools like [subfinder](https://github.com/projectdiscovery/subfinder) query other people's services (crt.sh, Shodan, VirusTotal...) at run time. That works, but you inherit their quotas, captchas, downtime, and blind spots, and every run starts from zero. subidx takes a different position: pull from the source yourself, once, and own the index.
-
-What that buys you in a recon workflow:
-
-- **Continuous coverage.** The tailer runs 24/7 with crash-safe resume. A certificate issued thirty seconds ago is already searchable. Point-in-time tools only see what third parties had indexed when you ran them.
-- **First-seen timelines.** Every name carries the earliest date it appeared in any watched log (`&dates=1`). Diff over time to catch new subdomains on targets between engagements.
-- **No keys, no quotas.** Zero API keys, zero third-party terms of service. Your only dependencies are the log lists themselves.
-- **Verified provenance.** Each log's signing key is pinned against the log list, every signed tree head is cryptographically verified before the tailer acts on it, and every fetched batch must pass an RFC 6962 inclusion-proof spot check against the signed root before it is ingested — entries that cannot be proven part of the signed tree are never stored.
-- **Historical drains.** Years of history from retired and rejected logs can be backfilled locally — terabytes if you want all of it.
-- **A hosted API, not just a CLI.** Pipe results straight into your existing tooling: `curl "http://localhost:8099/v1/search?apex=target.com"`.
-
-Honest limits: CT logs only contain hostnames that were issued a certificate. Names that exist purely in DNS records or web mentions are invisible here, which is why subidx complements rather than replaces broader-source tools.
-
-Status: the live pipeline works end to end. A four minute run against the live firehose collected about 470,000 names from 21 logs.
-
-## Note on subfaster
-
-A similar project exists: [subfaster](https://github.com/melvinsh/subfaster). This project was built before its author was aware of subfaster. The two share no code and take different approaches: subfaster queries other people's services (crt.sh, RapidDNS, and friends) at run time, while subidx tails the CT logs itself, builds its own local index, and serves it from your own machine. Any resemblance is convergent evolution, not copying.
+![subidx dashboard](assets/dashboard.png)
 
 ## Quick start
 
 ```
 go build -o subidx .
-./subidx tail -store ./data          # collect names (runs forever, Ctrl-C to stop)
-./subidx serve -store ./data -addr :8099   # search what you collected
+./subidx tail -store ./data              # collect names (runs forever, Ctrl-C to stop)
+./subidx serve -store ./data -addr :8099 # search what you collected
 ```
-
-Then:
 
 ```
 curl "http://localhost:8099/v1/search?apex=letsencrypt.org"
 ```
 
-or open `http://localhost:8099/` in a browser for the built-in dashboard: search any apex, filter and sort results, toggle first-seen dates, and copy/download as txt/csv. The UI is embedded in the binary; there is nothing extra to deploy.
+or open `http://localhost:8099/` for the dashboard: search any apex, filter and sort results instantly, toggle first-seen dates, export txt/csv, and watch a live feed of newly collected names. The UI is compiled into the binary; there is nothing extra to deploy.
 
-## The web dashboard
+## Why not just use subfinder?
 
-`serve` hosts a small single-page dashboard at `/`, compiled into the binary from `internal/web/dist` with `go:embed`. It is same-origin with the API, so it inherits the rate limiter and Host allow-list unchanged, and it ships a strict Content-Security-Policy (`default-src 'none'`), no inline scripts, and no external requests.
+Tools like [subfinder](https://github.com/projectdiscovery/subfinder) query other people's services at run time and inherit their quotas, captchas, and blind spots, and every run starts from zero. subidx pulls from the source once and owns the index:
 
-What it shows:
+- **Continuous coverage.** The tailer runs 24/7 with crash-safe resume; a certificate issued thirty seconds ago is already searchable.
+- **First-seen timelines.** Every name carries its earliest seen date (`&dates=1`). Diff over time to catch new subdomains between engagements.
+- **No keys, no quotas.** Your only dependencies are the log lists themselves.
+- **Verified provenance.** Log keys are pinned against the log lists, tree heads are cryptographically verified, and each fetched batch must pass an RFC 6962 inclusion-proof spot check before it is stored.
+- **Historical drains.** Years of history from retired logs can be backfilled, if you have the terabytes.
+- **An API and dashboard, not just a CLI.** Pipe results into your tooling or browse them.
 
-- **Search.** Type an apex, get every collected name in a virtualized list that stays smooth at the 100k-result cap. Results stream in as NDJSON and render progressively: the first row appears in well under 100 ms, and the full 100k finish in about half a second on localhost, with the count ticking up as rows arrive.
-- **Live mode.** Toggle **live** and the dashboard opens a server-sent-event stream for that domain. Newly collected names appear within seconds, highlighted in amber with a "+N new" pill while they buffer; stats refresh on their own. Costs one rate-budget unit per session plus occasional catch-up polls.
-- **First-seen dates.** Sortable, hideable; newest-collected first by default so freshly issued certificates surface immediately.
-- **Instant filtering.** Substring filter runs client-side over loaded results, no extra requests against your rate budget.
-- **Export.** Copy to clipboard or download `.txt`/`.csv` of exactly what is on screen, matching the curl workflow.
-- **Stats header.** Total names indexed plus the busiest apexes (one click to search them), from `GET /v1/stats`.
-- **Budget meter.** Live view of your remaining per-IP rate limit, read from the same `x-ratelimit-*` headers the API already sends.
+Honest limit: CT only sees names that were issued a certificate. Names that live only in DNS are invisible here, which is why subidx complements rather than replaces broader-source tools.
 
-To change the UI: sources live in `internal/web/src` (Svelte 5 + Vite). Run `make ui` to rebuild `dist` and commit it, so `go build` keeps working without Node. For live-reload development, run `./subidx serve` in one terminal and `make dev` in another; Vite proxies `/v1` to the server.
-
-## Deploying
-
-**Simplest: one Render service.** The dashboard is inside the binary, so a single service serves UI and API. The repo carries a `Dockerfile` and a `render.yaml` blueprint: create a Blueprint from the repo on Render, adjust `CORS_ORIGINS` and the 5 GB disk, done. The service needs its persistent disk (the index lives there; free tier has none), `-no-drain` is set (history is terabytes), and `-trusted-proxy-hops 1` makes rate limits count real client IPs. About $7/mo on Starter.
-
-**Split: Vercel frontend + Render API.** Supported, at the cost of exposing the API cross-origin: import `internal/web` into Vercel as a Vite project, set env `VITE_API_BASE=https://your-service.onrender.com`, and set the Render env `CORS_ORIGINS=https://your-dashboard.vercel.app`. The API has no auth, so anyone with the URL can query it either way; keep the link unlisted if that matters.
-
-No external database is ever needed: storage is an embedded Pebble directory on the attached disk.
-
-If you would rather spend zero: run `subidx serve` at home and put it on your Tailnet.
+A similar project exists, [subfaster](https://github.com/melvinsh/subfaster); subidx was built before its author knew of it. The two share no code and differ in approach: subfaster queries other people's services at run time, subidx tails the CT logs itself. Convergent evolution, not copying.
 
 ## How it works
 
-1. **Log discovery.** Every hour, subidx fetches three log lists (Chrome's main list, Chrome's full list including rejected logs, and Apple's current list) and merges them by log ID. Logs marked pending, qualified, or usable are tailed live. Old and rejected logs hold years of history; use `-no-drain` if you do not want to pull all of that.
-2. **Tailing.** For each log, subidx checks the tree size every few seconds and downloads only the new entries, up to 1000 per request. It tracks how far it got per log (a watermark) so it can resume after a restart, and it never moves that marker backwards even if a log misbehaves.
-3. **Parsing.** Each entry is decoded just long enough to read the SAN list (the part of a certificate that names the domains it covers). Both ordinary certificates and precertificates are handled. Everything else about the certificate is thrown away.
-4. **Normalizing.** Names are lowercased, trailing dots and wildcard prefixes (`*.`) are stripped, reserved names like `.local` are rejected, and each name is assigned to its registered domain (apex) using the Public Suffix List.
-5. **Storing.** One writer process inserts into a pebble key-value store, keyed by domain plus subdomain. If a name shows up again, only the earliest date is kept. Nothing is ever deleted.
-6. **Serving.** A small HTTP API answers searches, with rate limiting and health checks.
+1. **Discovery.** Every hour, subidx fetches Chrome's log lists (plus Apple's) and merges them. Live logs are tailed; old and rejected logs hold the drainable history (`-no-drain` to skip).
+2. **Tailing.** Each log is polled every few seconds for new entries, up to 1000 per request, with a per-log watermark that never moves backwards across restarts.
+3. **Parsing.** Entries are decoded just far enough to read the SAN list; everything else is discarded.
+4. **Normalizing.** Names are lowercased, wildcards and trailing dots stripped, reserved names rejected, and each name assigned to its registered domain (apex) via the Public Suffix List.
+5. **Storing.** A single writer inserts into an embedded Pebble store. Duplicates keep only the earliest date; nothing is deleted.
+6. **Serving.** An HTTP API with rate limiting and health checks, plus the embedded dashboard.
 
 ## Commands
 
 | Command | What it does |
 |---|---|
 | `tail` | Watch CT logs and store names. Runs until you stop it. |
-| `serve` | Serve the search API. Add `-no-tail` to serve without collecting. |
-| `stats` | Print total records and the top 10 domains. `-recount` fixes the counters with a full scan if they ever drift. |
+| `serve` | Serve the API and dashboard. Add `-no-tail` to serve without collecting. |
+| `stats` | Print total records and the top 10 domains. `-recount` fixes drifted counters. |
 | `version` | Print the version. |
 
 Useful flags:
@@ -88,42 +56,52 @@ Useful flags:
 | Flag | Default | Meaning |
 |---|---|---|
 | `-store` | `./data` | Where the database lives |
-| `-addr` | `127.0.0.1:8080` | Listen address for `serve` (binds localhost by default; use `:8080` to expose) |
+| `-addr` | `127.0.0.1:8080` | Listen address (binds localhost by default; use `:8080` to expose) |
 | `-poll-interval` | `3s` | How often each log is checked for new entries |
 | `-window` | `512` | Entries fetched per request while catching up |
-| `-no-drain` | off | Skip old and rejected logs (they hold years of history, terabytes). Works for both `tail` and `serve` |
+| `-no-drain` | off | Skip old and rejected logs (years of history, terabytes). Works on `tail` and `serve` |
 | `-rate-limit` | `1000` | Search requests allowed per IP per rolling 24 hours |
-| `-max-results` | `100000` | Max results buffered per search query (newest-collected first) |
-| `-allowed-hosts` | loopback names | Host header values to accept. Blocks DNS rebinding; add your hostname when exposing the API |
-| `-trusted-proxy-hops` | `0` | How many proxies in front of you. 0 means X-Forwarded-For is ignored |
+| `-max-results` | `100000` | Max results buffered per search query |
+| `-allowed-hosts` | loopback names | Host header values to accept (blocks DNS rebinding; add your hostname when exposing) |
+| `-cors-origins` | empty | Browser origins allowed to call the API from a separately hosted frontend |
+| `-trusted-proxy-hops` | `0` | Proxies in front of you; 0 means X-Forwarded-For is ignored |
 
-Only one process can use a store directory at a time. The database takes an exclusive lock.
+Only one process can use a store directory at a time; the database takes an exclusive lock.
 
 ## The API
 
-`GET /v1/search?apex=example.com` returns one name per line. This matches crt.name exactly, including the odd parts:
+`GET /v1/search?apex=example.com` returns one name per line:
 
 | Case | Response |
 |---|---|
-| Known domain | `200`, one name per line, in collection order |
+| Known domain | `200`, one name per line |
 | Unknown domain | `200`, empty body (not 404) |
-| Not a bare domain (`www.example.com`, `_bad.com`) | `400`, plain text reason |
-| Missing `apex` parameter | `400`, `missing apex parameter` |
-| Add `&dates=1` | Each line gets a TAB and the first-seen date |
-| Add `&format=json` | JSON array of `{"sub":"..."}` objects |
-| Add both | Objects become `{"first_seen":"...","sub":"..."}`, date can be `null` |
-| Add `&format=ndjson` | One JSON object per line, flushed as it is produced, for streaming clients |
-| HEAD requests | `405` |
+| Not a bare domain | `400`, plain text reason |
+| Missing `apex` | `400`, `missing apex parameter` |
+| `&dates=1` | Tab plus first-seen date per line |
+| `&format=json` | JSON array of `{"sub":"..."}` objects |
+| `&format=ndjson` | One JSON object per line, flushed for streaming clients |
+| HEAD | `405` |
 
-Every response to `/v1/search` also carries `x-total-count` (how many names the apex has in the index, cheap O(1) counter read) and `x-max-seq` (the apex's newest sequence number, usable as a change cursor), so clients can show progress and poll for deltas. Responses to `/v1/search` and `/v1/stats` are gzipped when the client sends `Accept-Encoding: gzip` (BestSpeed, so the tailers keep their CPU).
+Search responses carry `x-total-count` (names in the index for the apex) and `x-max-seq` (a cursor for change tracking). Search and stats are gzipped on request.
 
-Two more endpoints power live dashboards:
+Live dashboards get two more endpoints:
 
-- `GET /v1/watch?apex=X&after=N` — NDJSON rows collected after sequence `N`, plus `x-max-seq` and `x-truncated` headers. A cheap "what changed since my cursor" poll.
-- `GET /v1/feed?apex=X` — a server-sent-event stream of newly stored names for that apex (`id:` carries the seq; heartbeats every 15s). Opening a stream costs one unit of rate budget; slow consumers get an explicit `resync` event instead of silent gaps.
+- `GET /v1/watch?apex=X&after=N` — NDJSON of names collected since sequence `N`, with `x-max-seq` and `x-truncated`. A cheap "what changed" poll.
+- `GET /v1/feed?apex=X` — server-sent-event stream of new names for that apex, one rate-budget unit per session. Slow consumers get a `resync` event instead of silent gaps.
 
-Also served: `/v1/stats` (`{"total":N,"top":[{"apex":...,"count":...}]}`, optional `&n=`, capped at 100, cached 15s; the top list scans at most 250k apex counters and approximates beyond that), `/healthz` (process is up) and `/readyz` (store is open and usable). Both health endpoints skip the rate limit; search, watch, feed and stats do not.
+Also: `/v1/stats` (`{"total":N,"top":[...]}`, optional `&n=`, cached, top-k bounded), `/healthz`, `/readyz`. Health endpoints skip the rate limit; everything else is counted.
+
+## Deploying
+
+No external database, ever: storage is an embedded Pebble directory on a persistent disk.
+
+- **One Render service** (simplest). The repo ships `Dockerfile` + `render.yaml`: create a Blueprint, attach the 5 GB disk, done. The dashboard is inside the binary, so UI and API share the origin. Starter plan, ~$7/mo. A live instance runs at [subidx.onrender.com](https://subidx.onrender.com).
+- **Vercel frontend + Render API.** Deploy `internal/web` to Vercel as a Vite project and set env `VITE_API_BASE=https://your-service.onrender.com`. Set the Render env `CORS_ORIGINS=https://your-dashboard.vercel.app` so the browser may call the API cross-origin (Render auto-redeploys on env changes). Live: [subidx.lverma.com](https://subidx.lverma.com) fronting the Render instance above.
+- **Zero cost.** Run it at home and put it on your Tailnet.
+
+Both paths auto-deploy on push to `main`. The API has no auth, so treat a public URL as a semi-private link.
 
 ## What gets stored
 
-Three facts per name: the domain (apex, the registered domain like `example.com`), the full subdomain, and `first_seen`, the earliest date the name appeared in any log we watched. Multi-level names are kept whole, so `ap.www.sandbox.namecheap.com` is one record under `namecheap.com`.
+Three facts per name: the apex (registered domain), the full subdomain, and `first_seen`, the earliest date it appeared in any watched log. Multi-level names are kept whole, so `ap.www.sandbox.namecheap.com` is one record under `namecheap.com`.
