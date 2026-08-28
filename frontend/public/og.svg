@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-label="subidx — passive subdomain index from certificate transparency">
+  <defs>
+    <linearGradient id="cardBg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#101216"/>
+      <stop offset="1" stop-color="#14171c"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1200" height="630" fill="url(#cardBg)"/>
+  <rect x="0" y="0" width="1200" height="6" fill="#e2a54a"/>
+
+  <!-- favicon motif, scaled up -->
+  <g transform="translate(78,120) scale(6.9)">
+    <rect width="32" height="32" rx="6" fill="#101216"/>
+    <path d="M9 8v16" stroke="#e2a54a" stroke-width="1.6" stroke-linecap="round"/>
+    <circle cx="9" cy="8" r="2.4" fill="#e2a54a"/>
+    <path d="M9 14h7a3 3 0 0 1 3 3v3" stroke="#5b6472" stroke-width="1.6" stroke-linecap="round" fill="none"/>
+    <path d="M9 21h11a3 3 0 0 1 3 3v0" stroke="#5b6472" stroke-width="1.6" stroke-linecap="round" fill="none"/>
+    <circle cx="19" cy="20" r="2" fill="#8a919d"/>
+    <circle cx="23" cy="24" r="2" fill="#8a919d"/>
+  </g>
+
+  <!-- wordmark -->
+  <text x="360" y="330" fill="#e2a54a" font-family="Menlo, 'SF Mono', monospace" font-size="104" font-weight="700" letter-spacing="4">subidx</text>
+
+  <!-- tagline -->
+  <text x="362" y="400" fill="#8a919d" font-family="'Helvetica Neue', Arial, sans-serif" font-size="34" font-weight="500" letter-spacing="7">PASSIVE SUBDOMAIN INDEX</text>
+  <text x="362" y="442" fill="#5b6472" font-family="'Helvetica Neue', Arial, sans-serif" font-size="30" font-weight="400" letter-spacing="5">CERTIFICATE TRANSPARENCY</text>
+
+  <!-- divider -->
+  <rect x="362" y="486" width="600" height="2" fill="#242a33"/>
+
+  <text x="362" y="528" fill="#5b6472" font-family="Monaco, Menlo, monospace" font-size="26" letter-spacing="1">self-hosted · no keys, no quotas</text>
+</svg>
