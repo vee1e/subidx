@@ -16,7 +16,6 @@ import (
 
 	"subidx/internal/apex"
 	"subidx/internal/store"
-	"subidx/internal/web"
 )
 
 type Server struct {
@@ -80,7 +79,6 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/feed", s.handleFeed)
 	mux.HandleFunc("/healthz", s.handleHealth)
 	mux.HandleFunc("/readyz", s.handleReady)
-	mux.Handle("/", web.Handler())
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !s.hostAllowed(r.Host) {
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")

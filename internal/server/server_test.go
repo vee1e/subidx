@@ -281,10 +281,10 @@ func TestHeadNotAllowed(t *testing.T) {
 	if po.Code != http.StatusMethodNotAllowed {
 		t.Errorf("post code = %d", po.Code)
 	}
-	// Unknown paths serve the embedded UI shell instead of a bare 404.
+	// Unknown paths are a bare 404; the UI is a separately hosted app now.
 	nf := do(t, s, http.MethodGet, "/nope")
-	if nf.Code != http.StatusOK || !strings.Contains(nf.Header().Get("Content-Type"), "text/html") {
-		t.Errorf("ui shell code = %d ct = %q", nf.Code, nf.Header().Get("Content-Type"))
+	if nf.Code != http.StatusNotFound {
+		t.Errorf("unknown path code = %d, want 404", nf.Code)
 	}
 }
 

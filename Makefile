@@ -2,9 +2,11 @@
 
 all: build
 
-# Rebuild the dashboard UI (output is committed at internal/web/dist).
+# Build the dashboard UI for a separate host (Vercel, Render, or any
+# static host). Point it at the subidx API with VITE_API_BASE; the
+# binary no longer embeds or serves the UI.
 ui:
-	cd internal/web && npm ci && npm run build
+	cd frontend && npm ci && npm run build
 
 build: go build -o subidx .
 
@@ -15,7 +17,7 @@ vet: go vet ./...
 serve: go run . serve -store ./data -addr 127.0.0.1:8099
 
 dev:
-	cd internal/web && SUBIDX_API=$${SUBIDX_API:-http://127.0.0.1:8080} npm run dev
+	cd frontend && SUBIDX_API=$${SUBIDX_API:-http://127.0.0.1:8080} npm run dev
 
 clean:
 	rm -f subidx

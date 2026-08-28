@@ -1,6 +1,6 @@
 # subidx
 
-Self-hosted passive subdomain enumeration from Certificate Transparency. subidx tails public CT logs (the records of every HTTPS certificate issued), indexes every hostname it sees, and serves them through a search API and dashboard you control. Think crt.name, but the data lives on your machine.
+Self-hosted passive subdomain enumeration from Certificate Transparency. subidx tails public CT logs (the records of every HTTPS certificate issued), indexes every hostname it sees, and serves them through a search API you control. Think crt.name, but the data lives on your machine.
 
 ![subidx dashboard](assets/dashboard.png)
 
@@ -16,7 +16,7 @@ go build -o subidx .
 curl "http://localhost:8099/v1/search?apex=letsencrypt.org"
 ```
 
-or open `http://localhost:8099/` for the dashboard: search any apex, filter and sort results instantly, toggle first-seen dates, export txt/csv, and watch a live feed of newly collected names. The UI is compiled into the binary; there is nothing extra to deploy.
+The binary is API-only. The dashboard is a separate SPA in `frontend/` (Vite + Svelte): search any apex, filter and sort results instantly, toggle first-seen dates, export txt/csv, and watch a live feed of newly collected names. Deploy it to any static host (Vercel, Render, or your own), pointing it at the API with `VITE_API_BASE` and allowing its origin with `-cors-origins`. For local work, `make dev` runs it against a local `subidx serve`.
 
 ## What gets stored
 
@@ -35,7 +35,7 @@ Tools like [subfinder](https://github.com/projectdiscovery/subfinder) query othe
 - **No keys, no quotas.** Your only dependencies are the log lists themselves.
 - **Verified provenance.** Log keys are pinned against the log lists, tree heads are cryptographically verified, and each fetched batch must pass an RFC 6962 inclusion-proof spot check before it is stored.
 - **Historical drains.** Years of history from retired logs can be backfilled, if you have the terabytes.
-- **An API and dashboard, not just a CLI.** Pipe results into your tooling or browse them.
+- **An API and dashboard, not just a CLI.** Pipe results into your tooling, or browse them in the separately hosted UI.
 
 Limitations: CT only sees names that were issued a certificate. Names that live only in DNS are invisible here, which is why subidx complements rather than replaces broader-source tools.
 
@@ -46,14 +46,14 @@ Limitations: CT only sees names that were issued a certificate. Names that live 
 3. **Parsing.** Entries are decoded just far enough to read the SAN list; everything else is discarded.
 4. **Normalizing.** Names are lowercased, wildcards and trailing dots stripped, reserved names rejected, and each name assigned to its registered domain (apex) via the Public Suffix List.
 5. **Storing.** A single writer inserts into an embedded Pebble store. Duplicates keep only the earliest date; nothing is deleted.
-6. **Serving.** An HTTP API with rate limiting and health checks, plus the embedded dashboard.
+6. **Serving.** An HTTP API with rate limiting and health checks. The dashboard is a separate frontend built from `frontend/` and served by any static host.
 
 ## Commands
 
 | Command | What it does |
 |---|---|
 | `tail` | Watch CT logs and store names. Runs until you stop it. |
-| `serve` | Serve the API and dashboard. Add `-no-tail` to serve without collecting. |
+| `serve` | Serve the read-only search API and health endpoints. Add `-no-tail` to serve without collecting. |
 | `stats` | Print total records and the top 10 domains. `-recount` fixes drifted counters. |
 | `version` | Print the version. |
 
