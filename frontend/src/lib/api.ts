@@ -6,7 +6,7 @@ export interface Row {
 }
 
 // Where the API lives. Empty means same-origin (the single-binary
-// deployment); Vercel builds set VITE_API_BASE to the Render service URL.
+// deployment); Vercel builds set VITE_API_BASE to the VPS API URL.
 export const apiBase = ((import.meta.env.VITE_API_BASE as string | undefined) ?? '').replace(/\/+$/, '')
 
 const apiUrl = (path: string) => `${apiBase}${path}`
