@@ -65,6 +65,7 @@ Useful flags:
 | `-addr` | `127.0.0.1:8080` | Listen address (binds localhost by default; use `:8080` to expose) |
 | `-poll-interval` | `3s` | How often each log is checked for new entries |
 | `-window` | `512` | Entries fetched per request while catching up |
+| `-head-start` | `0` | On a fresh store, begin each log this many entries back from its head instead of at index 0. Without it a new store replays every log from the beginning, which is tens of billions of entries |
 | `-no-drain` | off | Skip old and rejected logs (years of history, terabytes). Works on `tail` and `serve` |
 | `-rate-limit` | `1000` | Search requests allowed per IP per rolling 24 hours |
 | `-max-results` | `100000` | Max results buffered per search query |

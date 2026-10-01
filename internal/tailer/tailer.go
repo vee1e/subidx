@@ -22,10 +22,11 @@ import (
 const sourceCT byte = 1
 
 type Tailer struct {
-	Store    *store.Store
-	Interval time.Duration
-	Window   int64
-	Drain    bool
+	Store     *store.Store
+	Interval  time.Duration
+	Window    int64
+	Drain     bool
+	HeadStart int64
 
 	mu      sync.Mutex
 	started map[string]bool
@@ -74,6 +75,14 @@ func (t *Tailer) tailOne(ctx context.Context, lg loglist.Log, state string) {
 	}
 	id := lg.LogID
 	wm, err := t.Store.Watermark(id)
+	if err == nil && wm == 0 && t.HeadStart > 0 {
+		if sth, herr := client.STH(ctx); herr == nil && sth.TreeSize > t.HeadStart {
+			wm = sth.TreeSize - t.HeadStart
+			if serr := t.Store.AdvanceWatermark(id, wm); serr != nil {
+				log.Printf("tail %s: seed watermark: %v", client.ShortID(), serr)
+			}
+		}
+	}
 	if err != nil {
 		// A read failure is indistinguishable from corruption. Assuming
 		// zero here would re-drain the entire log from index 0, so skip

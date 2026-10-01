@@ -81,9 +81,10 @@ func cmdStats(args []string) error {
 }
 
 type commonConfig struct {
-	storeDir string
-	interval time.Duration
-	window   int64
+	storeDir  string
+	interval  time.Duration
+	window    int64
+	headStart int64
 }
 
 func addCommon(fs *flag.FlagSet) *commonConfig {
@@ -91,6 +92,7 @@ func addCommon(fs *flag.FlagSet) *commonConfig {
 	fs.StringVar(&c.storeDir, "store", "./data", "store directory")
 	fs.DurationVar(&c.interval, "poll-interval", 3*time.Second, "base STH poll interval")
 	fs.Int64Var(&c.window, "window", 512, "get-entries window size")
+	fs.Int64Var(&c.headStart, "head-start", 0, "on a fresh store, start each log this many entries back from its head instead of index 0")
 	return c
 }
 
@@ -225,7 +227,7 @@ func cmdTail(args []string) error {
 }
 
 func runTailers(ctx context.Context, st *store.Store, c *commonConfig, drain bool) {
-	t := &tailer.Tailer{Store: st, Interval: c.interval, Window: c.window, Drain: drain}
+	t := &tailer.Tailer{Store: st, Interval: c.interval, Window: c.window, Drain: drain, HeadStart: c.headStart}
 	for {
 		logs, err := loglist.FetchAll(ctx, nil)
 		if err == nil {
