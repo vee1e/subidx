@@ -81,10 +81,12 @@ func cmdStats(args []string) error {
 }
 
 type commonConfig struct {
-	storeDir  string
-	interval  time.Duration
-	window    int64
-	headStart int64
+	storeDir   string
+	interval   time.Duration
+	window     int64
+	headStart  int64
+	blockCache int64
+	batchDelay time.Duration
 }
 
 func addCommon(fs *flag.FlagSet) *commonConfig {
@@ -93,6 +95,8 @@ func addCommon(fs *flag.FlagSet) *commonConfig {
 	fs.DurationVar(&c.interval, "poll-interval", 3*time.Second, "base STH poll interval")
 	fs.Int64Var(&c.window, "window", 512, "get-entries window size")
 	fs.Int64Var(&c.headStart, "head-start", 0, "on a fresh store, start each log this many entries back from its head instead of index 0")
+	fs.Int64Var(&c.blockCache, "block-cache", store.DefaultBlockCacheBytes>>20, "pebble block cache in MiB (0 keeps this default)")
+	fs.DurationVar(&c.batchDelay, "batch-delay", 0, "pause after each get-entries window; paces a large catch-up so it does not pin the CPU (0 = flat out)")
 	return c
 }
 
@@ -114,7 +118,7 @@ func cmdServe(args []string) error {
 		return fmt.Errorf("invalid config")
 	}
 
-	st, err := store.Open(c.storeDir)
+	st, err := store.Open(c.storeDir, store.WithBlockCache(c.blockCache<<20))
 	if err != nil {
 		return fmt.Errorf("open store: %w", err)
 	}
@@ -210,7 +214,7 @@ func cmdTail(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	st, err := store.Open(c.storeDir)
+	st, err := store.Open(c.storeDir, store.WithBlockCache(c.blockCache<<20))
 	if err != nil {
 		return fmt.Errorf("open store: %w", err)
 	}
@@ -227,7 +231,7 @@ func cmdTail(args []string) error {
 }
 
 func runTailers(ctx context.Context, st *store.Store, c *commonConfig, drain bool) {
-	t := &tailer.Tailer{Store: st, Interval: c.interval, Window: c.window, Drain: drain, HeadStart: c.headStart}
+	t := &tailer.Tailer{Store: st, Interval: c.interval, Window: c.window, Drain: drain, HeadStart: c.headStart, BatchDelay: c.batchDelay}
 	for {
 		logs, err := loglist.FetchAll(ctx, nil)
 		if err == nil {

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cockroachdb/pebble/v2"
@@ -64,6 +65,57 @@ type Store struct {
 	wmHigh         map[string]int64
 	pendingTotal   uint64
 	totalBase      uint64
+
+	// Counters since process start: records that reached apply(), how many
+	// of them were new to the store, and how many were already stored. The
+	// gap between the first two is the duplicate rate, which says whether
+	// catch-up is downloading data the store already holds.
+	ingestCalls atomic.Uint64
+	ingestNew   atomic.Uint64
+	ingestDup   atomic.Uint64
+}
+
+// Pebble's own defaults (8 MB block cache, 4 MB memtables) assume a store
+// that fits in memory. subidx holds a multi-GB store behind per-name point
+// lookups, so both are raised here: a small cache turns every lookup into a
+// disk read plus a decompress, and small memtables flush constantly. The
+// cache is sized to keep every file's index and filter blocks resident
+// while leaving room under a 1 GB container limit (see -block-cache).
+const (
+	DefaultBlockCacheBytes int64  = 128 << 20
+	DefaultMemTableBytes   uint64 = 32 << 20
+)
+
+// maxDedupCache bounds how many records the ingest loop keeps in memory
+// across flushes. Beyond it the maps are dropped and the next lookup for
+// those keys falls back to a database Get.
+const maxDedupCache = 1 << 20
+
+// Options tunes the embedded Pebble instance.
+type Options struct {
+	BlockCacheBytes int64
+	MemTableBytes   uint64
+}
+
+// Option mutates Options; pass to Open.
+type Option func(*Options)
+
+// WithBlockCache sets the block cache size in bytes. Values <= 0 are ignored.
+func WithBlockCache(bytes int64) Option {
+	return func(o *Options) {
+		if bytes > 0 {
+			o.BlockCacheBytes = bytes
+		}
+	}
+}
+
+// WithMemTable sets the steady-state memtable size in bytes. Values <= 0 are ignored.
+func WithMemTable(bytes uint64) Option {
+	return func(o *Options) {
+		if bytes > 0 {
+			o.MemTableBytes = bytes
+		}
+	}
 }
 
 type ingestOp struct {
@@ -78,8 +130,15 @@ type recountResult struct {
 	err   error
 }
 
-func Open(dir string) (*Store, error) {
-	db, err := pebble.Open(dir, &pebble.Options{})
+func Open(dir string, opts ...Option) (*Store, error) {
+	o := Options{BlockCacheBytes: DefaultBlockCacheBytes, MemTableBytes: DefaultMemTableBytes}
+	for _, fn := range opts {
+		fn(&o)
+	}
+	db, err := pebble.Open(dir, &pebble.Options{
+		CacheSize:    o.BlockCacheBytes,
+		MemTableSize: o.MemTableBytes,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -127,9 +186,21 @@ func (s *Store) ingestLoop() {
 		if err := batch.Commit(pebble.Sync); err != nil {
 			return err
 		}
-		s.pendingRecords = make(map[string]*recState)
-		s.pendingCounts = make(map[string]uint64)
+		// pendingRecords and pendingCounts are deliberately kept: the batch
+		// just committed writes exactly what they hold, so they still match
+		// the database and go on skipping the per-record Get. Dropping them
+		// here (the old behaviour) cost one full lookup per name on every
+		// name, on a store far larger than the block cache. Past
+		// maxDedupCache they are dropped so memory stays bounded.
+		if len(s.pendingRecords) > maxDedupCache || len(s.pendingCounts) > maxDedupCache {
+			s.pendingRecords = make(map[string]*recState)
+			s.pendingCounts = make(map[string]uint64)
+		}
 		s.pendingWM = make(map[string]int64)
+		// The committed batch wrote total = totalBase + pendingTotal, so the
+		// new base is that sum. Without this the total restarts from the
+		// base loaded at Open and never grows past one flush window.
+		s.totalBase += s.pendingTotal
 		s.pendingTotal = 0
 		pending = 0
 		batch.Reset()
@@ -198,6 +269,7 @@ type recState struct {
 }
 
 func (s *Store) apply(batch *pebble.Batch, r Record) error {
+	s.ingestCalls.Add(1)
 	rkBytes := recordKey(r.Apex, r.Sub)
 	rk := string(rkBytes)
 	st, known := s.pendingRecords[rk]
@@ -223,6 +295,7 @@ func (s *Store) apply(batch *pebble.Batch, r Record) error {
 		}
 	}
 	if st == nil {
+		s.ingestNew.Add(1)
 		ns := &recState{firstSeen: r.FirstSeen, source: r.Source, seq: s.seq + 1}
 		s.pendingRecords[rk] = ns
 		if err := batch.Set(rkBytes, encodeValue(ns.firstSeen, ns.source, ns.seq), nil); err != nil {
@@ -246,12 +319,24 @@ func (s *Store) apply(batch *pebble.Batch, r Record) error {
 		}
 		return nil
 	}
+	s.ingestDup.Add(1)
 	s.pendingRecords[rk] = st
 	if st.firstSeen <= r.FirstSeen {
 		return nil
 	}
+	// Keep the cached state in step with what is written below; the cache
+	// now outlives the flush, so a stale firstSeen here would let a later
+	// record push the stored earliest date forwards.
+	st.firstSeen = r.FirstSeen
 	val := encodeValue(r.FirstSeen, st.source, st.seq)
 	return batch.Set(rkBytes, val, nil)
+}
+
+// IngestStats reports, since process start, how many records reached the
+// ingest loop (calls), how many were new to the store (added), and how many
+// were already stored (dup). Read-only, safe from any goroutine.
+func (s *Store) IngestStats() (calls, added, dup uint64) {
+	return s.ingestCalls.Load(), s.ingestNew.Load(), s.ingestDup.Load()
 }
 
 func (s *Store) pendingCount(apex string) uint64 {
@@ -579,6 +664,8 @@ func (s *Store) recountInLoop(flush func() error, batch *pebble.Batch) (uint64, 
 	}
 	s.totalBase = total
 	s.pendingTotal = 0
+	// Unlike flush, a recount replaces every counter wholesale, so both
+	// caches are invalid afterwards and must go.
 	s.pendingCounts = make(map[string]uint64)
 	s.pendingRecords = make(map[string]*recState)
 	batch.Reset()

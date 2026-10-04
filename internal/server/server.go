@@ -204,6 +204,11 @@ type jsonTop struct {
 type jsonStats struct {
 	Total uint64    `json:"total"`
 	Top   []jsonTop `json:"top"`
+	// Ingest counters since process start: calls into the ingest loop, how
+	// many of those records were new, and how many were already stored.
+	IngestCalls uint64 `json:"ingest_calls"`
+	IngestNew   uint64 `json:"ingest_new"`
+	IngestDup   uint64 `json:"ingest_dup"`
 }
 
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
@@ -254,6 +259,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	}
 
 	out := jsonStats{Total: total, Top: make([]jsonTop, 0, len(top))}
+	out.IngestCalls, out.IngestNew, out.IngestDup = s.Store.IngestStats()
 	for _, ac := range top {
 		out.Top = append(out.Top, jsonTop{Apex: ac.Apex, Count: ac.Count})
 	}

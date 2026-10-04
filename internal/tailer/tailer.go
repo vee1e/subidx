@@ -27,6 +27,13 @@ type Tailer struct {
 	Window    int64
 	Drain     bool
 	HeadStart int64
+	// BatchDelay pauses after each fetched window. Catch-up is CPU-bound:
+	// every window is downloaded, gunzipped, JSON-parsed, X.509-parsed and
+	// then written to the store, and a tailer that runs `for pos < to`
+	// without a pause pins the process at its CPU quota for as long as the
+	// backlog lasts (it also does two HTTP requests per window). 0 keeps
+	// the old flat-out behaviour.
+	BatchDelay time.Duration
 
 	mu      sync.Mutex
 	started map[string]bool
@@ -224,6 +231,20 @@ func (t *Tailer) fetchRange(ctx context.Context, client *rfc6962.Client, logID s
 		}
 		total += n
 		pos += n
+		// Persist the watermark per window, not once at the end. The
+		// window's records and this watermark land in the same atomic
+		// batch, so nothing can be marked fetched without being stored;
+		// without this, a restart in the middle of a multi-hour catch-up
+		// resumes where the call started and re-downloads every window
+		// fetched since.
+		if err := t.Store.AdvanceWatermark(logID, from+total); err != nil {
+			return total, err
+		}
+		if pos < to && t.BatchDelay > 0 {
+			if !sleepCtx(ctx, t.BatchDelay) {
+				return total, ctx.Err()
+			}
+		}
 	}
 	return total, nil
 }

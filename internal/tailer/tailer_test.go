@@ -382,3 +382,109 @@ func TestTamperedEntriesRejected(t *testing.T) {
 		t.Fatalf("watermark = %d, %v; want 0 — tampered batches must not advance it", wm, err)
 	}
 }
+
+// TestWatermarkPersistsPerWindow: progress must survive an interrupted
+// fetchRange. Otherwise a restart in the middle of a catch-up resumes at the
+// watermark the call started from and re-downloads every window fetched
+// since, which with -batch-delay is hours of work.
+func TestWatermarkPersistsPerWindow(t *testing.T) {
+	fl := newFakeLog(t)
+	keyB64, logID := fl.keyB64(t)
+	for i, dns := range []string{"w1.progress.example.com", "w2.progress.example.com", "w3.progress.example.com"} {
+		der := makeLeafCert(t, []string{dns})
+		fl.entries = append(fl.entries, fl.leafInput(der, int64(1000+i)))
+	}
+	srv := fl.serve(t)
+	defer srv.Close()
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// One entry per window, and a delay long enough that the fetch cannot
+	// finish before the test interrupts it, exactly as a restart would.
+	tr := &Tailer{Store: st, Interval: time.Millisecond, Window: 1, BatchDelay: 10 * time.Second}
+	tr.Sync(ctx, []loglist.Log{{
+		LogID: logID,
+		Key:   keyB64,
+		URL:   srv.URL,
+		State: map[string]loglist.StateDetail{"usable": {}},
+	}})
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		res, err := st.Scan("example.com", 0)
+		wm, wmErr := st.Watermark(logID)
+		if err == nil && wmErr == nil && len(res) > 0 && wm == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			res, _ := st.Scan("example.com", 0)
+			wm, _ := st.Watermark(logID)
+			t.Fatalf("first window never persisted: records=%d watermark=%d (watermark only advances when the whole fetch finishes)", len(res), wm)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	tr.Wait()
+
+	wm, err := st.Watermark(logID)
+	if err != nil || wm != 1 {
+		t.Fatalf("watermark = %d, %v; want 1 after the interrupted fetch", wm, err)
+	}
+}
+
+// TestBatchDelayPacesWindows: three windows with BatchDelay set must take at
+// least two delays (the pause is between windows, never after the last), and
+// must still ingest everything and land the watermark.
+func TestBatchDelayPacesWindows(t *testing.T) {
+	fl := newFakeLog(t)
+	keyB64, logID := fl.keyB64(t)
+	for i, dns := range []string{"a.pace.example.com", "b.pace.example.com", "c.pace.example.com"} {
+		der := makeLeafCert(t, []string{dns})
+		fl.entries = append(fl.entries, fl.leafInput(der, int64(1000+i)))
+	}
+	srv := fl.serve(t)
+	defer srv.Close()
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	const delay = 60 * time.Millisecond
+	start := time.Now()
+	tr := &Tailer{Store: st, Interval: time.Millisecond, Window: 1, BatchDelay: delay}
+	tr.Sync(ctx, []loglist.Log{{
+		LogID: logID,
+		Key:   keyB64,
+		URL:   srv.URL,
+		State: map[string]loglist.StateDetail{"usable": {}},
+	}})
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		res, err := st.Scan("example.com", 0)
+		if err == nil && len(res) == 3 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("index never filled: %d results, err %v", len(res), err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if elapsed := time.Since(start); elapsed < 2*delay {
+		t.Fatalf("three windows with a %v delay finished in %v; want at least %v", delay, elapsed, 2*delay)
+	}
+	wm, err := st.Watermark(logID)
+	if err != nil || wm != 3 {
+		t.Fatalf("watermark = %d, %v; want 3", wm, err)
+	}
+}

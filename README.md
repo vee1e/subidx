@@ -72,6 +72,8 @@ Useful flags:
 | `-allowed-hosts` | loopback names | Host header values to accept (blocks DNS rebinding; add your hostname when exposing) |
 | `-cors-origins` | empty | Browser origins allowed to call the API from a separately hosted frontend |
 | `-trusted-proxy-hops` | `0` | Proxies in front of you; 0 means X-Forwarded-For is ignored |
+| `-block-cache` | `128` | Pebble block cache in MiB. Raise it if searches or ingest hit a store much larger than memory |
+| `-batch-delay` | `0` | Pause after each `get-entries` window. A large backlog downloads flat out and pins a CPU until it drains; this trades catch-up speed for CPU |
 
 Only one process can use a store directory at a time; the database takes an exclusive lock.
 
@@ -97,6 +99,6 @@ Live dashboards get two more endpoints:
 - `GET /v1/watch?apex=X&after=N`, NDJSON of names collected since sequence `N`, with `x-max-seq` and `x-truncated`. A cheap "what changed" poll.
 - `GET /v1/feed?apex=X`, server-sent-event stream of new names for that apex, one rate-budget unit per session. Slow consumers get a `resync` event instead of silent gaps.
 
-Also: `/v1/stats` (`{"total":N,"top":[...]}`, optional `&n=`, cached, top-k bounded), `/healthz`, `/readyz`. Health endpoints skip the rate limit; everything else is counted.
+Also: `/v1/stats` (`{"total":N,"top":[...]}` plus `ingest_calls`/`ingest_new`/`ingest_dup`, since process start, optional `&n=`, cached, top-k bounded), `/healthz`, `/readyz`. Health endpoints skip the rate limit; everything else is counted.
 
 

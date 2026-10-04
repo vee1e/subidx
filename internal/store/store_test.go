@@ -250,6 +250,78 @@ func TestTopApproxBounds(t *testing.T) {
 	}
 }
 
+func TestTotalAccumulatesAcrossFlushes(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	for i := 0; i < 3; i++ {
+		if err := st.Ingest(Record{Apex: "example.com", Sub: fmt.Sprintf("a%d.example.com", i), FirstSeen: 1000, Source: 1}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	time.Sleep(200 * time.Millisecond) // let the first batch flush
+	for i := 3; i < 5; i++ {
+		if err := st.Ingest(Record{Apex: "example.com", Sub: fmt.Sprintf("a%d.example.com", i), FirstSeen: 1000, Source: 1}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	time.Sleep(200 * time.Millisecond)
+	if got, _ := st.Total(); got != 5 {
+		t.Fatalf("total = %d, want 5 (the count must survive a flush)", got)
+	}
+}
+
+func TestFirstSeenNeverMovesForwards(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	rec := func(fs int64) Record {
+		return Record{Apex: "example.com", Sub: "a.example.com", FirstSeen: fs, Source: 1}
+	}
+	// A later, larger firstSeen must never overwrite an earlier one, even
+	// when the record was already cached by an earlier lookup.
+	for _, fs := range []int64{500, 100, 300, 700} {
+		if err := st.Ingest(rec(fs)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	time.Sleep(200 * time.Millisecond)
+	res, err := st.Scan("example.com", 10)
+	if err != nil || len(res) != 1 {
+		t.Fatalf("scan = %d results, err=%v; want 1", len(res), err)
+	}
+	if res[0].FirstSeen != 100 {
+		t.Fatalf("firstSeen = %d, want 100", res[0].FirstSeen)
+	}
+}
+
+func TestOpenOptions(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "db"), WithBlockCache(4<<20), WithMemTable(1<<20))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	// Zero/negative values keep the defaults instead of passing a bad size
+	// to pebble.
+	var o Options
+	WithBlockCache(0)(&o)
+	WithMemTable(0)(&o)
+	if o.BlockCacheBytes != 0 || o.MemTableBytes != 0 {
+		t.Fatalf("zero-value options were not ignored: %+v", o)
+	}
+	if err := st.Ingest(Record{Apex: "example.com", Sub: "a.example.com", FirstSeen: 1000, Source: 1}); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(150 * time.Millisecond)
+	if got, _ := st.Total(); got != 1 {
+		t.Fatalf("total = %d, want 1", got)
+	}
+}
+
 func TestTopOrdersByCount(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "db")
 	st, err := Open(dir)
