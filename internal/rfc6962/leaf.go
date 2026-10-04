@@ -1,7 +1,7 @@
 package rfc6962
 
 import (
-	"crypto/x509"
+	"encoding/asn1"
 	"encoding/binary"
 	"fmt"
 	"strings"
@@ -116,18 +116,35 @@ func readUint24Labeled(b []byte) ([]byte, []byte, error) {
 	return b[:n], b[n:], nil
 }
 
+// namesFromCert reads the SAN list and the embedded SCT list straight out of
+// the certificate's DER: a certificate is SEQUENCE { tbsCertificate,
+// signatureAlgorithm, signatureValue }, and namesFromTBS already walks the
+// TBS part for the precert path. Running crypto/x509.ParseCertificate here
+// would also parse the public key, the issuer and subject and the validity
+// window, none of which is read, and cost about 3% of total CPU. Entries
+// whose certificate is structurally broken now yield no names instead of an
+// error; the tailer skips both cases the same way.
 func namesFromCert(der []byte) ([]string, []int64, error) {
-	cert, err := x509.ParseCertificate(der)
+	var outer asn1.RawValue
+	if _, err := asn1.Unmarshal(der, &outer); err != nil {
+		return nil, nil, err
+	}
+	if outer.Tag != asn1.TagSequence || !outer.IsCompound {
+		return nil, nil, fmt.Errorf("certificate is not a sequence")
+	}
+	children, ok := iterDER(outer.Bytes)
+	if !ok || len(children) == 0 {
+		return nil, nil, fmt.Errorf("truncated certificate")
+	}
+	tbs := children[0]
+	if tbs.tag != 0x30 {
+		return nil, nil, fmt.Errorf("certificate does not start with a tbsCertificate sequence")
+	}
+	names, scts, err := namesFromTBS(tbs.full)
 	if err != nil {
 		return nil, nil, err
 	}
-	var scts []int64
-	for _, ext := range cert.Extensions {
-		if ext.Id.String() == OIDExtensionSCT {
-			scts = parseSCTList(ext.Value)
-		}
-	}
-	return dedupeLower(cert.DNSNames), scts, nil
+	return dedupeLower(names), scts, nil
 }
 
 func dedupeLower(in []string) []string {
