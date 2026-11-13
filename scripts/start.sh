@@ -6,7 +6,7 @@ exec subidx serve \
   -store "${STORE_DIR:-/var/data/subidx}" \
   -addr ":${PORT:-8080}" \
   -no-drain \
-  -trusted-proxy-hops "${TRUSTED_HOPS:-1}" \
+  -trusted-proxy-hops "${TRUSTED_HOPS:-0}" \
   -rate-limit "${RATE_LIMIT:-2000}" \
   -allowed-hosts "${ALLOWED_HOSTS:-$RENDER_EXTERNAL_HOSTNAME}" \
   -cors-origins "${CORS_ORIGINS:-}"

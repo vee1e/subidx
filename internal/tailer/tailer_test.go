@@ -27,11 +27,13 @@ import (
 )
 
 type fakeLog struct {
-	entries   [][]byte
-	sthHits   int
-	shortRead bool
-	tamper    bool
-	key       *ecdsa.PrivateKey
+	entries      [][]byte
+	sthHits      int
+	shortRead    bool
+	tamper       bool
+	sthFailN     int
+	shiftEntries bool
+	key          *ecdsa.PrivateKey
 }
 
 // Test-side reference RFC 6962 Merkle tree, so the fake log can serve
@@ -127,6 +129,11 @@ func (f *fakeLog) serve(t *testing.T) *httptest.Server {
 		switch r.URL.Path {
 		case "/ct/v1/get-sth":
 			f.sthHits++
+			if f.sthFailN > 0 {
+				f.sthFailN--
+				http.Error(w, "unavailable", http.StatusServiceUnavailable)
+				return
+			}
 			root := rootOfT(f.entries)
 			json.NewEncoder(w).Encode(map[string]any{
 				"tree_size":           len(f.entries),
@@ -165,6 +172,11 @@ func (f *fakeLog) serve(t *testing.T) *httptest.Server {
 		case "/ct/v1/get-entries":
 			var start, end int64
 			fmt.Sscanf(r.URL.RawQuery, "start=%d&end=%d", &start, &end)
+			if f.shiftEntries && start > 0 {
+				width := end - start
+				start = 0
+				end = width
+			}
 			if start < 0 {
 				start = 0
 			}
@@ -486,5 +498,102 @@ func TestBatchDelayPacesWindows(t *testing.T) {
 	wm, err := st.Watermark(logID)
 	if err != nil || wm != 3 {
 		t.Fatalf("watermark = %d, %v; want 3", wm, err)
+	}
+}
+
+func TestHeadStartRetriesAndDoesNotFallBackToZero(t *testing.T) {
+	fl := newFakeLog(t)
+	fl.sthFailN = 2
+	keyB64, logID := fl.keyB64(t)
+	for i, dns := range []string{"a.hs.example.com", "b.hs.example.com", "c.hs.example.com", "d.hs.example.com", "e.hs.example.com"} {
+		der := makeLeafCert(t, []string{dns})
+		fl.entries = append(fl.entries, fl.leafInput(der, int64(1000+i)))
+	}
+	srv := fl.serve(t)
+	defer srv.Close()
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	tr := &Tailer{Store: st, Interval: 10 * time.Millisecond, Window: 8, HeadStart: 2}
+	tr.Sync(ctx, []loglist.Log{{
+		LogID: logID,
+		Key:   keyB64,
+		URL:   srv.URL,
+		State: map[string]loglist.StateDetail{"usable": {}},
+	}})
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		wm, wmErr := st.Watermark(logID)
+		res, err := st.Scan("example.com", 0)
+		if wmErr == nil && err == nil && wm == 5 && len(res) == 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("head-start never completed: watermark=%d records=%d err=%v wmErr=%v", wm, len(res), err, wmErr)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	res, _ := st.Scan("example.com", 0)
+	got := map[string]bool{}
+	for _, r := range res {
+		got[r.Sub] = true
+	}
+	if got["a.hs.example.com"] || got["b.hs.example.com"] || got["c.hs.example.com"] {
+		t.Fatalf("entries before the head-start watermark were ingested: %+v", got)
+	}
+	if !got["d.hs.example.com"] || !got["e.hs.example.com"] {
+		t.Fatalf("head-start window missing: %+v", got)
+	}
+}
+
+func TestSpotCheckRejectsShiftedBatch(t *testing.T) {
+	fl := newFakeLog(t)
+	fl.shiftEntries = true
+	keyB64, logID := fl.keyB64(t)
+	for i, dns := range []string{"s0.shift.example.com", "s1.shift.example.com", "s2.shift.example.com", "s3.shift.example.com", "s4.shift.example.com"} {
+		der := makeLeafCert(t, []string{dns})
+		fl.entries = append(fl.entries, fl.leafInput(der, int64(1000+i)))
+	}
+	srv := fl.serve(t)
+	defer srv.Close()
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.SetWatermarkSync(logID, 2); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	tr := &Tailer{Store: st, Interval: time.Millisecond, Window: 3}
+	tr.Sync(ctx, []loglist.Log{{
+		LogID: logID,
+		Key:   keyB64,
+		URL:   srv.URL,
+		State: map[string]loglist.StateDetail{"usable": {}},
+	}})
+	time.Sleep(300 * time.Millisecond)
+	cancel()
+	tr.Wait()
+
+	res, err := st.Scan("example.com", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res) != 0 {
+		t.Fatalf("shifted batch was ingested: %+v", res)
+	}
+	wm, err := st.Watermark(logID)
+	if err != nil || wm != 2 {
+		t.Fatalf("watermark = %d, %v; want 2 — a batch whose proofs do not match the requested indices must not advance it", wm, err)
 	}
 }

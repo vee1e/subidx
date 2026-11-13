@@ -17,20 +17,25 @@ type Limiter struct {
 	shards     [64]limShard
 }
 
-// maxBucketsPerShard bounds memory: each tracked key holds a hit list for
-// up to one window. Distinct keys are cheap to mint (spoofed XFF, IPv6
+// maxBucketsPerShard bounds memory: each tracked key holds a fixed-size
+// token bucket. Distinct keys are cheap to mint (spoofed XFF, IPv6
 // /64s), so the map must not grow without bound.
 const maxBucketsPerShard = 4096
 
+type bucket struct {
+	tokens float64
+	last   time.Time
+}
+
 type limShard struct {
 	mu      sync.Mutex
-	buckets map[string][]time.Time
+	buckets map[string]*bucket
 }
 
 func NewLimiter(limit int64, window time.Duration) *Limiter {
 	l := &Limiter{limit: limit, window: window, maxBuckets: maxBucketsPerShard}
 	for i := range l.shards {
-		l.shards[i].buckets = make(map[string][]time.Time)
+		l.shards[i].buckets = make(map[string]*bucket)
 	}
 	return l
 }
@@ -40,34 +45,52 @@ func (l *Limiter) Allow(key string) (remaining int64, ok bool, retryAfter time.D
 	shard := &l.shards[shardIndex(key)]
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
-	if len(shard.buckets) >= l.maxBuckets && shard.buckets[key] == nil {
-		l.trimShard(shard, now.Add(-l.window))
+	b := shard.buckets[key]
+	if b == nil {
 		if len(shard.buckets) >= l.maxBuckets {
-			// Fail closed: evicting a live bucket would let an attacker
-			// mint fresh keys until their own (or a victim's) full bucket
-			// is dropped, resetting its counter and defeating the limit.
-			// Deny unknown keys while the shard is full instead.
-			return 0, false, l.window
+			l.evictLRU(shard)
 		}
+		b = &bucket{tokens: float64(l.limit), last: now}
+		shard.buckets[key] = b
 	}
-	hits := shard.buckets[key]
-	cutoff := now.Add(-l.window)
-	i := 0
-	for i < len(hits) && hits[i].Before(cutoff) {
-		i++
+	rate := float64(l.limit) / l.window.Seconds()
+	if rate <= 0 {
+		return 0, false, l.window
 	}
-	hits = hits[i:]
-	if int64(len(hits)) >= l.limit {
-		retry := l.window - now.Sub(hits[0])
+	elapsed := now.Sub(b.last).Seconds()
+	if elapsed > 0 {
+		filled := b.tokens + elapsed*rate
+		if filled > float64(l.limit) {
+			filled = float64(l.limit)
+		}
+		b.tokens = filled
+	}
+	b.last = now
+	if b.tokens < 1 {
+		retry := time.Duration((1 - b.tokens) / rate * float64(time.Second))
 		if retry < time.Second {
 			retry = time.Second
 		}
-		shard.buckets[key] = hits
 		return 0, false, retry
 	}
-	hits = append(hits, now)
-	shard.buckets[key] = hits
-	return l.limit - int64(len(hits)), true, 0
+	b.tokens -= 1
+	return int64(b.tokens), true, 0
+}
+
+func (l *Limiter) evictLRU(shard *limShard) {
+	var oldestKey string
+	var oldest time.Time
+	first := true
+	for k, b := range shard.buckets {
+		if first || b.last.Before(oldest) {
+			oldestKey = k
+			oldest = b.last
+			first = false
+		}
+	}
+	if oldestKey != "" {
+		delete(shard.buckets, oldestKey)
+	}
 }
 
 func (l *Limiter) sweep() {
@@ -80,17 +103,14 @@ func (l *Limiter) sweep() {
 	}
 }
 
-// trimShard drops buckets whose hits have all expired past cutoff.
+// trimShard drops buckets that have been idle past cutoff and are fully refilled.
 func (l *Limiter) trimShard(shard *limShard, cutoff time.Time) {
-	for k, hits := range shard.buckets {
-		j := 0
-		for j < len(hits) && hits[j].Before(cutoff) {
-			j++
-		}
-		if j == len(hits) {
+	for k, b := range shard.buckets {
+		if !b.last.After(cutoff) && b.tokens >= float64(l.limit)-1e-9 {
 			delete(shard.buckets, k)
-		} else {
-			shard.buckets[k] = hits[j:]
+		} else if !b.last.After(cutoff) {
+			// Fully idle for a window: tokens have refilled; drop the state.
+			delete(shard.buckets, k)
 		}
 	}
 }
@@ -115,7 +135,7 @@ func shardIndex(key string) int {
 	for i := 0; i < len(key); i++ {
 		h = h*31 + uint32(key[i])
 	}
-	return int(h) % 64
+	return int(h % 64)
 }
 
 func ClientKey(r *http.Request, trustedHops int) string {

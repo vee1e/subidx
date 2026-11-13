@@ -42,7 +42,7 @@ Limitations: CT only sees names that were issued a certificate. Names that live 
 ## How it works
 
 1. **Discovery.** Every hour, subidx fetches Chrome's log lists (plus Apple's) and merges them. Live logs are tailed; old and rejected logs hold the drainable history (`-no-drain` to skip).
-2. **Tailing.** Each log is polled every few seconds for new entries, up to 1000 per request, with a per-log watermark that never moves backwards across restarts.
+2. **Tailing.** Each log is polled every few seconds for new entries, up to 512 per request by default, with a per-log watermark that never moves backwards across restarts.
 3. **Parsing.** Entries are decoded just far enough to read the SAN list; everything else is discarded.
 4. **Normalizing.** Names are lowercased, wildcards and trailing dots stripped, reserved names rejected, and each name assigned to its registered domain (apex) via the Public Suffix List.
 5. **Storing.** A single writer inserts into an embedded Pebble store. Duplicates keep only the earliest date; nothing is deleted.

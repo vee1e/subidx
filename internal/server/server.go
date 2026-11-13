@@ -5,6 +5,7 @@ package server
 
 import (
 	"encoding/json"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -35,6 +36,8 @@ type Server struct {
 	Stop        chan struct{}
 	CORSOrigins []string
 	activeFeeds atomic.Int64
+	feedMu      sync.Mutex
+	feedsByKey  map[string]int
 
 	statsMu    sync.Mutex
 	statsCache map[int]statsCacheEntry
@@ -137,12 +140,11 @@ func (s *Server) methodNotAllowed(w http.ResponseWriter) {
 }
 
 func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
-	if !s.gate(w, r) {
-		return
-	}
-
 	if r.Method != http.MethodGet {
 		s.methodNotAllowed(w)
+		return
+	}
+	if !s.gate(w, r) {
 		return
 	}
 
@@ -212,11 +214,11 @@ type jsonStats struct {
 }
 
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
-	if !s.gate(w, r) {
-		return
-	}
 	if r.Method != http.MethodGet {
 		s.methodNotAllowed(w)
+		return
+	}
+	if !s.gate(w, r) {
 		return
 	}
 
@@ -282,17 +284,20 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) renderText(w http.ResponseWriter, results []store.Result, dates bool) {
-	var b strings.Builder
-	for _, r := range results {
-		b.WriteString(r.Sub)
-		if dates {
-			b.WriteByte('\t')
-			b.WriteString(formatTS(r.FirstSeen))
-		}
-		b.WriteByte('\n')
-	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.Write([]byte(b.String()))
+	for _, r := range results {
+		if _, err := io.WriteString(w, r.Sub); err != nil {
+			return
+		}
+		if dates {
+			if _, err := io.WriteString(w, "\t"+formatTS(r.FirstSeen)); err != nil {
+				return
+			}
+		}
+		if _, err := io.WriteString(w, "\n"); err != nil {
+			return
+		}
+	}
 }
 
 type jsonSub struct {

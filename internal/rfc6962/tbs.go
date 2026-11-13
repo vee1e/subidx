@@ -40,10 +40,14 @@ func readTLV(b []byte) (derTLV, []byte, bool) {
 		if n == 0 || n > 4 || len(b) < 2+n {
 			return derTLV{}, nil, false
 		}
-		l = 0
+		var ul uint64
 		for i := 0; i < n; i++ {
-			l = l<<8 | int(b[2+i])
+			ul = ul<<8 | uint64(b[2+i])
 		}
+		if ul > uint64(^uint(0)>>1) {
+			return derTLV{}, nil, false
+		}
+		l = int(ul)
 		hdr = 2 + n
 	}
 	if len(b) < hdr+l {
@@ -125,10 +129,14 @@ func parseSAN(octets []byte) []string {
 }
 
 func parseSCTList(octets []byte) []int64 {
-	// Per RFC 6962 section 3.3, the extension value is already the
-	// TLS-encoded SCT list: uint16 total length followed by
-	// length-prefixed SCTs. Callers pass the OCTET STRING contents.
+	// RFC 6962 §3.3: extnValue is an OCTET STRING wrapping the TLS
+	// SignedCertificateTimestampList. Callers pass the extension's
+	// OCTET STRING contents, which still need that inner unwrap.
 	list := octets
+	var inner []byte
+	if _, err := asn1.Unmarshal(octets, &inner); err == nil && len(inner) > 0 {
+		list = inner
+	}
 	if len(list) < 2 {
 		return nil
 	}
