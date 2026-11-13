@@ -75,6 +75,8 @@ Useful flags:
 | `-block-cache` | `128` | Pebble block cache in MiB. Raise it if searches or ingest hit a store much larger than memory |
 | `-batch-delay` | `0` | Pause after each `get-entries` window. A large backlog downloads flat out and pins a CPU until it drains; this trades catch-up speed for CPU |
 
+If you run behind a reverse proxy, set `-trusted-proxy-hops` (or `TRUSTED_HOPS` in the Docker script) to the number of trusted proxies that append `X-Forwarded-For`. The default of 0 is the safe choice when the process is reached directly: client-controlled `X-Forwarded-For` values are ignored. Behind a proxy, leaving it at 0 keys the rate limit and the 4-stream live-feed cap on the proxy's own address, so every client shares one budget. Set it explicitly in production.
+
 Only one process can use a store directory at a time; the database takes an exclusive lock.
 
 ## The API

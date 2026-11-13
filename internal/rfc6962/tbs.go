@@ -132,11 +132,12 @@ func parseSCTList(octets []byte) []int64 {
 	// RFC 6962 §3.3: extnValue is an OCTET STRING wrapping the TLS
 	// SignedCertificateTimestampList. Callers pass the extension's
 	// OCTET STRING contents, which still need that inner unwrap.
-	list := octets
 	var inner []byte
-	if _, err := asn1.Unmarshal(octets, &inner); err == nil && len(inner) > 0 {
-		list = inner
+	rest, err := asn1.Unmarshal(octets, &inner)
+	if err != nil || len(inner) == 0 || len(rest) > 0 {
+		return nil
 	}
+	list := inner
 	if len(list) < 2 {
 		return nil
 	}

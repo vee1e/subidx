@@ -47,7 +47,7 @@ type logRunner struct {
 	drainTarget int64 // -1 means live (no drain cap)
 }
 
-func (t *Tailer) Sync(ctx context.Context, logs []loglist.Log) {
+func (t *Tailer) Sync(ctx context.Context, logs []loglist.Log, reapMissing bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.runners == nil {
@@ -61,6 +61,17 @@ func (t *Tailer) Sync(ctx context.Context, logs []loglist.Log) {
 		state := lg.CurrentState()
 		if !t.Drain && (state == "readonly" || state == "frozen" || state == "retired" || state == "rejected") {
 			if r, ok := t.runners[lg.LogID]; ok {
+				// An already-running log that just became readonly or
+				// frozen should drain to the signed final tree head
+				// rather than stopping mid-window.
+				if dt := drainTargetFor(lg, state); dt >= 0 {
+					r.mu.Lock()
+					r.state = state
+					r.drainTarget = dt
+					r.mu.Unlock()
+					seen[lg.LogID] = true
+					continue
+				}
 				r.cancel()
 				delete(t.runners, lg.LogID)
 			}
@@ -93,10 +104,12 @@ func (t *Tailer) Sync(ctx context.Context, logs []loglist.Log) {
 			t.tailOne(rctx, lg, r)
 		}(lg, r)
 	}
-	for id, r := range t.runners {
-		if !seen[id] {
-			r.cancel()
-			delete(t.runners, id)
+	if reapMissing {
+		for id, r := range t.runners {
+			if !seen[id] {
+				r.cancel()
+				delete(t.runners, id)
+			}
 		}
 	}
 }

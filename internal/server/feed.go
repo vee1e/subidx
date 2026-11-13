@@ -112,9 +112,6 @@ func (s *Server) handleFeed(w http.ResponseWriter, r *http.Request) {
 		s.methodNotAllowed(w)
 		return
 	}
-	if !s.gate(w, r) {
-		return
-	}
 	if s.Hub == nil {
 		http.Error(w, "feed unavailable", http.StatusServiceUnavailable)
 		return
@@ -134,6 +131,8 @@ func (s *Server) handleFeed(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid apex: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	// Reserve feed slots before charging the rate limiter so a client
+	// already at the cap does not burn a token on every 503.
 	if n := s.activeFeeds.Add(1); n > maxActiveFeeds {
 		s.activeFeeds.Add(-1)
 		http.Error(w, "too many live feeds", http.StatusServiceUnavailable)
@@ -162,6 +161,10 @@ func (s *Server) handleFeed(w http.ResponseWriter, r *http.Request) {
 		s.feedMu.Unlock()
 	}()
 
+	if !s.gate(w, r) {
+		return
+	}
+
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
@@ -173,10 +176,18 @@ func (s *Server) handleFeed(w http.ResponseWriter, r *http.Request) {
 	h.Set("Cache-Control", "no-cache")
 	h.Set("X-Accel-Buffering", "no")
 
-	// The server-wide WriteTimeout would otherwise kill this stream after
-	// 60 seconds. Clearing the deadline keeps a single connection open
-	// and stops reconnects from burning the caller's rate budget.
-	_ = http.NewResponseController(w).SetWriteDeadline(time.Time{})
+	// The server-wide ReadTimeout and WriteTimeout would otherwise kill
+	// this stream early: WriteTimeout on the next heartbeat, and
+	// ReadTimeout by cancelling r.Context() once the leftover body read
+	// expires. Clearing both keeps a single connection open and stops
+	// reconnects from burning the caller's rate budget.
+	rc := http.NewResponseController(w)
+	if err := rc.SetWriteDeadline(time.Time{}); err != nil {
+		log.Printf("feed: clear write deadline: %v", err)
+	}
+	if err := rc.SetReadDeadline(time.Time{}); err != nil {
+		log.Printf("feed: clear read deadline: %v", err)
+	}
 
 	id, sub := s.Hub.Subscribe(a)
 	defer s.Hub.Unsubscribe(id)

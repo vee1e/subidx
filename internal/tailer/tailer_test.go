@@ -256,7 +256,7 @@ func TestTailToSearchRoundTrip(t *testing.T) {
 			}}
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			tr.Sync(ctx, logs)
+			tr.Sync(ctx, logs, true)
 
 			deadline := time.Now().Add(10 * time.Second)
 			for {
@@ -313,7 +313,7 @@ func TestSTHRegressionIgnored(t *testing.T) {
 		Key:   keyB64,
 		URL:   srv.URL,
 		State: map[string]loglist.StateDetail{"usable": {}},
-	}})
+	}}, true)
 	time.Sleep(50 * time.Millisecond)
 	wm, _ := st.Watermark(logID)
 	if wm < 5 {
@@ -346,7 +346,7 @@ func TestWatermarkErrorSkipsLog(t *testing.T) {
 		Key:   keyB64,
 		URL:   srv.URL,
 		State: map[string]loglist.StateDetail{"usable": {}},
-	}})
+	}}, true)
 	tr.Wait()
 	if fl.sthHits != 0 {
 		t.Fatalf("tailer contacted log %d times despite watermark read failure", fl.sthHits)
@@ -375,7 +375,7 @@ func TestTamperedEntriesRejected(t *testing.T) {
 		Key:   keyB64,
 		URL:   srv.URL,
 		State: map[string]loglist.StateDetail{"usable": {}},
-	}})
+	}}, true)
 	// Several poll cycles with every served entry outside the signed
 	// tree: nothing may be ingested and the watermark must not move.
 	time.Sleep(300 * time.Millisecond)
@@ -425,7 +425,7 @@ func TestWatermarkPersistsPerWindow(t *testing.T) {
 		Key:   keyB64,
 		URL:   srv.URL,
 		State: map[string]loglist.StateDetail{"usable": {}},
-	}})
+	}}, true)
 
 	deadline := time.Now().Add(5 * time.Second)
 	for {
@@ -479,7 +479,7 @@ func TestBatchDelayPacesWindows(t *testing.T) {
 		Key:   keyB64,
 		URL:   srv.URL,
 		State: map[string]loglist.StateDetail{"usable": {}},
-	}})
+	}}, true)
 
 	deadline := time.Now().Add(10 * time.Second)
 	for {
@@ -526,7 +526,7 @@ func TestHeadStartRetriesAndDoesNotFallBackToZero(t *testing.T) {
 		Key:   keyB64,
 		URL:   srv.URL,
 		State: map[string]loglist.StateDetail{"usable": {}},
-	}})
+	}}, true)
 
 	deadline := time.Now().Add(10 * time.Second)
 	for {
@@ -580,7 +580,7 @@ func TestSpotCheckRejectsShiftedBatch(t *testing.T) {
 		Key:   keyB64,
 		URL:   srv.URL,
 		State: map[string]loglist.StateDetail{"usable": {}},
-	}})
+	}}, true)
 	time.Sleep(300 * time.Millisecond)
 	cancel()
 	tr.Wait()
