@@ -6,7 +6,9 @@ COPY . .
 RUN CGO_ENABLED=0 go build -o subidx .
 
 FROM alpine:3.21
-RUN adduser -D subidx
+RUN adduser -D subidx \
+ && mkdir -p /var/data \
+ && chown subidx:subidx /var/data
 COPY --from=build /src/subidx /usr/local/bin/subidx
 COPY scripts/start.sh /usr/local/bin/start.sh
 RUN chmod +x /usr/local/bin/start.sh

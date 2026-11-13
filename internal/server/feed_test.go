@@ -3,6 +3,7 @@ package server
 import (
 	"bufio"
 	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -123,5 +124,78 @@ func TestFeedStream(t *testing.T) {
 	}
 	if readUntil("secret.other.example", 1500*time.Millisecond) {
 		t.Fatal("event leaked across apex filter")
+	}
+}
+
+func TestFeedSurvivesServerTimeouts(t *testing.T) {
+	s, st := newTestServer(t, 0)
+	s.Hub = NewHub()
+	defer s.Hub.Close()
+	st.OnNew = func(r store.Record) {
+		s.Hub.Broadcast(FeedEvent{Apex: r.Apex, Sub: r.Sub, FirstSeen: r.FirstSeen, Seq: r.Seq})
+	}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hs := &http.Server{
+		Handler:           s.Handler(),
+		ReadHeaderTimeout: 200 * time.Millisecond,
+		ReadTimeout:       200 * time.Millisecond,
+		WriteTimeout:      200 * time.Millisecond,
+	}
+	errCh := make(chan error, 1)
+	go func() { errCh <- hs.Serve(ln) }()
+	defer hs.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+ln.Addr().String()+"/v1/feed?apex=example.com", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("code = %d", resp.StatusCode)
+	}
+
+	lines := make(chan string, 64)
+	go func() {
+		sc := bufio.NewScanner(resp.Body)
+		for sc.Scan() {
+			lines <- sc.Text()
+		}
+		close(lines)
+	}()
+	readUntil := func(substr string, d time.Duration) bool {
+		timeout := time.After(d)
+		for {
+			select {
+			case ln, ok := <-lines:
+				if !ok {
+					return false
+				}
+				if strings.Contains(ln, substr) {
+					return true
+				}
+			case <-timeout:
+				return false
+			}
+		}
+	}
+	if !readUntil("retry:", 3*time.Second) {
+		t.Fatal("no retry preamble")
+	}
+	time.Sleep(600 * time.Millisecond)
+	if err := st.Ingest(store.Record{Apex: "example.com", Sub: "late.example.com", FirstSeen: 1240000000000, Source: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if !readUntil("late.example.com", 5*time.Second) {
+		t.Fatal("stream died after ReadTimeout/WriteTimeout; deadlines were not cleared")
 	}
 }

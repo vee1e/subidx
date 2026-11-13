@@ -46,6 +46,9 @@ func VerifyInclusion(leafHash []byte, leafIndex, treeSize int64, auditPath [][]b
 	sn := treeSize - 1
 	r := leafHash
 	for _, p := range auditPath {
+		if sn == 0 {
+			return fmt.Errorf("audit path too long for tree size %d", treeSize)
+		}
 		if len(p) != sha256.Size {
 			return fmt.Errorf("audit path node has %d bytes; want 32", len(p))
 		}

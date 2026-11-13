@@ -8,13 +8,17 @@ all: build
 ui:
 	cd frontend && npm ci && npm run build
 
-build: go build -o subidx .
+build:
+	go build -o subidx .
 
-test: go test -race -count=1 ./...
+test:
+	go test -race -count=1 ./...
 
-vet: go vet ./...
+vet:
+	go vet ./...
 
-serve: go run . serve -store ./data -addr 127.0.0.1:8099
+serve:
+	go run . serve -store ./data -addr 127.0.0.1:8099
 
 dev:
 	cd frontend && SUBIDX_API=$${SUBIDX_API:-http://127.0.0.1:8080} npm run dev

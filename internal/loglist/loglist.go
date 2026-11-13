@@ -90,7 +90,7 @@ func (l *Log) Endpoint() string {
 	}
 }
 
-func FetchAll(ctx context.Context, client *http.Client) ([]Log, error) {
+func FetchAll(ctx context.Context, client *http.Client) (logs []Log, complete bool, err error) {
 	if client == nil {
 		client = &http.Client{
 			Timeout: 30 * time.Second,
@@ -143,14 +143,14 @@ func FetchAll(ctx context.Context, client *http.Client) ([]Log, error) {
 	}
 	if fetched == 0 {
 		if ctx.Err() != nil {
-			return nil, fmt.Errorf("log list fetch canceled: %w", ctx.Err())
+			return nil, false, fmt.Errorf("log list fetch canceled: %w", ctx.Err())
 		}
-		return nil, fmt.Errorf("all %d log list sources failed", len(urls))
+		return nil, false, fmt.Errorf("all %d log list sources failed", len(urls))
 	}
 	if fetched < len(urls) {
 		log.Printf("loglist: %d of %d sources failed", len(urls)-fetched, len(urls))
 	}
-	return out, nil
+	return out, fetched == len(urls), nil
 }
 
 func fetchOne(ctx context.Context, client *http.Client, url string) (*List, error) {

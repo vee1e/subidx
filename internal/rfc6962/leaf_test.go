@@ -130,9 +130,13 @@ func buildSCTListDER(t *testing.T, stamps ...int64) []byte {
 func TestEmbeddedSCTTimestamps(t *testing.T) {
 	stamps := []int64{111111111, 222222222}
 	extBytes := buildSCTListDER(t, stamps...)
+	wrapped, err := asn1.Marshal(extBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
 	cert := makeCertWithExtra(t, []string{"sct.example.com"}, pkix.Extension{
 		Id:    asn1OIDSCT,
-		Value: extBytes,
+		Value: wrapped,
 	})
 	names, got, err := namesFromCert(cert.Raw)
 	if err != nil {

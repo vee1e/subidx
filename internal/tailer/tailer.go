@@ -36,41 +36,99 @@ type Tailer struct {
 	BatchDelay time.Duration
 
 	mu      sync.Mutex
-	started map[string]bool
+	runners map[string]*logRunner
 	wg      sync.WaitGroup
 }
 
-func (t *Tailer) Sync(ctx context.Context, logs []loglist.Log) {
+type logRunner struct {
+	cancel      context.CancelFunc
+	mu          sync.Mutex
+	state       string
+	drainTarget int64 // -1 means live (no drain cap)
+}
+
+func (t *Tailer) Sync(ctx context.Context, logs []loglist.Log, reapMissing bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if t.started == nil {
-		t.started = make(map[string]bool)
+	if t.runners == nil {
+		t.runners = make(map[string]*logRunner)
 	}
+	seen := make(map[string]bool)
 	for _, lg := range logs {
 		if lg.Kind() != "rfc6962" || lg.CurrentState() == "" {
 			continue
 		}
 		state := lg.CurrentState()
 		if !t.Drain && (state == "readonly" || state == "frozen" || state == "retired" || state == "rejected") {
+			if r, ok := t.runners[lg.LogID]; ok {
+				// An already-running log that just became readonly or
+				// frozen should drain to the signed final tree head
+				// rather than stopping mid-window.
+				if dt := drainTargetFor(lg, state); dt >= 0 {
+					r.mu.Lock()
+					r.state = state
+					r.drainTarget = dt
+					r.mu.Unlock()
+					seen[lg.LogID] = true
+					continue
+				}
+				r.cancel()
+				delete(t.runners, lg.LogID)
+			}
 			continue
 		}
-		if t.started[lg.LogID] {
+		seen[lg.LogID] = true
+		drainTarget := drainTargetFor(lg, state)
+		if r, ok := t.runners[lg.LogID]; ok {
+			r.mu.Lock()
+			r.state = state
+			if drainTarget >= 0 {
+				r.drainTarget = drainTarget
+			}
+			r.mu.Unlock()
 			continue
 		}
-		t.started[lg.LogID] = true
+		rctx, cancel := context.WithCancel(ctx)
+		r := &logRunner{cancel: cancel, state: state, drainTarget: drainTarget}
+		t.runners[lg.LogID] = r
 		t.wg.Add(1)
-		go func(lg loglist.Log) {
+		go func(lg loglist.Log, r *logRunner) {
 			defer t.wg.Done()
-			t.tailOne(ctx, lg, state)
-		}(lg)
+			defer func() {
+				t.mu.Lock()
+				if t.runners[lg.LogID] == r {
+					delete(t.runners, lg.LogID)
+				}
+				t.mu.Unlock()
+			}()
+			t.tailOne(rctx, lg, r)
+		}(lg, r)
 	}
+	if reapMissing {
+		for id, r := range t.runners {
+			if !seen[id] {
+				r.cancel()
+				delete(t.runners, id)
+			}
+		}
+	}
+}
+
+func drainTargetFor(lg loglist.Log, state string) int64 {
+	switch state {
+	case "readonly", "frozen":
+		if d := lg.State[state]; d.FinalTreeHead != nil {
+			return d.FinalTreeHead.TreeSize
+		}
+	}
+	return -1
 }
 
 func (t *Tailer) Wait() {
 	t.wg.Wait()
 }
 
-func (t *Tailer) tailOne(ctx context.Context, lg loglist.Log, state string) {
+func (t *Tailer) tailOne(ctx context.Context, lg loglist.Log, r *logRunner) {
 	client, err := rfc6962.NewClient(lg.Endpoint(), lg.Key)
 	if err != nil {
 		log.Printf("tail %s: %v", lg.LogID, err)
@@ -82,33 +140,22 @@ func (t *Tailer) tailOne(ctx context.Context, lg loglist.Log, state string) {
 	}
 	id := lg.LogID
 	wm, err := t.Store.Watermark(id)
-	if err == nil && wm == 0 && t.HeadStart > 0 {
-		if sth, herr := client.STH(ctx); herr == nil && sth.TreeSize > t.HeadStart {
-			wm = sth.TreeSize - t.HeadStart
-			if serr := t.Store.AdvanceWatermark(id, wm); serr != nil {
-				log.Printf("tail %s: seed watermark: %v", client.ShortID(), serr)
-			}
-		}
-	}
 	if err != nil {
 		// A read failure is indistinguishable from corruption. Assuming
 		// zero here would re-drain the entire log from index 0, so skip
-		// the log instead; the watermark is retried on next process start.
+		// the log instead; the watermark is retried on the next Sync.
 		log.Printf("tail %s: watermark read failed: %v; skipping log to avoid full re-drain", client.ShortID(), err)
 		return
 	}
-	drainTarget := int64(-1)
-	switch state {
-	case "readonly", "frozen":
-		if d := lg.State[state]; d.FinalTreeHead != nil {
-			drainTarget = d.FinalTreeHead.TreeSize
+	if wm == 0 && t.HeadStart > 0 {
+		seeded, herr := t.seedHeadStart(ctx, client, id)
+		if herr != nil {
+			log.Printf("tail %s: head-start seed failed: %v; skipping log to avoid a full re-drain from index 0", client.ShortID(), herr)
+			return
 		}
-	case "retired", "rejected":
-		sth, err := client.STH(ctx)
-		if err == nil {
-			drainTarget = sth.TreeSize
-		}
+		wm = seeded
 	}
+
 	interval := t.Interval
 	if interval <= 0 {
 		interval = 3 * time.Second
@@ -117,10 +164,26 @@ func (t *Tailer) tailOne(ctx context.Context, lg loglist.Log, state string) {
 	if window <= 0 {
 		window = 512
 	}
+	r.mu.Lock()
+	state := r.state
+	drainTarget := r.drainTarget
+	r.mu.Unlock()
 	log.Printf("tail %s (%s %s): start watermark=%d drain=%d", client.ShortID(), state, lg.Description, wm, drainTarget)
 	for {
 		if ctx.Err() != nil {
 			return
+		}
+		r.mu.Lock()
+		state = r.state
+		drainTarget = r.drainTarget
+		r.mu.Unlock()
+		if (state == "retired" || state == "rejected") && drainTarget < 0 {
+			if sth, serr := client.STH(ctx); serr == nil && client.VerifySTH(sth) == nil {
+				drainTarget = sth.TreeSize
+				r.mu.Lock()
+				r.drainTarget = drainTarget
+				r.mu.Unlock()
+			}
 		}
 		sth, err := client.STH(ctx)
 		if err != nil {
@@ -164,6 +227,47 @@ func (t *Tailer) tailOne(ctx context.Context, lg loglist.Log, state string) {
 	}
 }
 
+func (t *Tailer) seedHeadStart(ctx context.Context, client *rfc6962.Client, id string) (int64, error) {
+	backoff := t.Interval
+	if backoff <= 0 {
+		backoff = time.Second
+	}
+	var last error
+	for {
+		if err := ctx.Err(); err != nil {
+			if last != nil {
+				return 0, fmt.Errorf("cancelled after: %w", last)
+			}
+			return 0, err
+		}
+		sth, err := client.STH(ctx)
+		if err != nil {
+			last = err
+			log.Printf("tail %s: head-start sth: %v", client.ShortID(), err)
+			if !sleepCtx(ctx, jitter(backoff)) {
+				return 0, ctx.Err()
+			}
+			continue
+		}
+		if err := client.VerifySTH(sth); err != nil {
+			last = err
+			log.Printf("tail %s: head-start verify: %v", client.ShortID(), err)
+			if !sleepCtx(ctx, jitter(backoff)) {
+				return 0, ctx.Err()
+			}
+			continue
+		}
+		wm := int64(0)
+		if sth.TreeSize > t.HeadStart {
+			wm = sth.TreeSize - t.HeadStart
+		}
+		if err := t.Store.AdvanceWatermark(id, wm); err != nil {
+			return 0, err
+		}
+		return wm, nil
+	}
+}
+
 func (t *Tailer) fetchRange(ctx context.Context, client *rfc6962.Client, logID string, from, to, window int64, root []byte, treeSize int64) (int64, error) {
 	var total int64
 	pos := from
@@ -182,17 +286,23 @@ func (t *Tailer) fetchRange(ctx context.Context, client *rfc6962.Client, logID s
 		if len(entries) == 0 {
 			return total, nil
 		}
+		// Only consider entries inside the requested [pos, end] window.
+		limit := len(entries)
+		if int64(limit) > end-pos+1 {
+			limit = int(end - pos + 1)
+		}
+		batch := entries[:limit]
 		// Bind the batch to the signed root before ingesting anything:
 		// a randomly chosen entry must prove inclusion in the verified
-		// tree. Entries served outside the signed tree — by a tampered
-		// connection or a misbehaving log — fail here and are never
-		// stored. The pick is cryptographically random so a tamperer
-		// cannot predict which entry will be checked.
-		if err := spotCheck(ctx, client, entries, root, treeSize); err != nil {
+		// tree at the index we asked for. Entries served outside the
+		// signed tree — by a tampered connection or a misbehaving log —
+		// fail here and are never stored. The pick is cryptographically
+		// random so a tamperer cannot predict which entry will be checked.
+		if err := spotCheck(ctx, client, batch, root, treeSize, pos); err != nil {
 			return total, fmt.Errorf("inclusion spot-check: %w", err)
 		}
 		skipped := int64(0)
-		for _, e := range entries {
+		for _, e := range batch {
 			leaf, err := rfc6962.DecodeLeafEntry(e)
 			if err != nil {
 				skipped++
@@ -225,10 +335,7 @@ func (t *Tailer) fetchRange(ctx context.Context, client *rfc6962.Client, logID s
 		if skipped > 0 {
 			log.Printf("tail %s: skipped %d undecodable entries in [%d,%d]", client.ShortID(), skipped, pos, end)
 		}
-		n := int64(len(entries))
-		if pos+n > to {
-			n = to - pos
-		}
+		n := int64(limit)
 		total += n
 		pos += n
 		// Persist the watermark per window, not once at the end. The
@@ -250,19 +357,25 @@ func (t *Tailer) fetchRange(ctx context.Context, client *rfc6962.Client, logID s
 }
 
 // spotCheck demands an inclusion proof for one uniformly random entry
-// of a fetched batch and verifies it locally against the signed root.
-func spotCheck(ctx context.Context, client *rfc6962.Client, entries []rfc6962.LeafEntry, root []byte, treeSize int64) error {
+// of a fetched batch and verifies it locally against the signed root,
+// requiring the proof's leaf index to be the index we requested.
+func spotCheck(ctx context.Context, client *rfc6962.Client, entries []rfc6962.LeafEntry, root []byte, treeSize, pos int64) error {
 	n, err := crand.Int(crand.Reader, big.NewInt(int64(len(entries))))
 	if err != nil {
 		return fmt.Errorf("pick entry: %w", err)
 	}
-	leafHash := rfc6962.LeafHash(entries[n.Int64()].LeafInput)
+	idx := n.Int64()
+	want := pos + idx
+	leafHash := rfc6962.LeafHash(entries[idx].LeafInput)
 	proof, err := client.ProofByHash(ctx, leafHash, treeSize)
 	if err != nil {
 		return fmt.Errorf("fetch proof: %w", err)
 	}
+	if proof.LeafIndex != want {
+		return fmt.Errorf("proof leaf index %d does not match requested index %d", proof.LeafIndex, want)
+	}
 	if err := rfc6962.VerifyInclusion(leafHash, proof.LeafIndex, treeSize, proof.AuditPath, root); err != nil {
-		return fmt.Errorf("entry %d of batch not provably in signed tree: %w", n, err)
+		return fmt.Errorf("entry %d of batch (index %d) not provably in signed tree: %w", idx, want, err)
 	}
 	return nil
 }

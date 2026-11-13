@@ -44,13 +44,14 @@ const (
 var errStoreClosed = fmt.Errorf("store closed")
 
 type Store struct {
-	db     *pebble.DB
-	ch     chan ingestOp
-	quit   chan struct{}
-	done   chan struct{}
-	seq    uint64
-	mu     sync.Mutex
-	closed bool
+	db      *pebble.DB
+	ch      chan ingestOp
+	quit    chan struct{}
+	done    chan struct{}
+	seq     uint64
+	mu      sync.Mutex
+	closed  bool
+	readers sync.WaitGroup
 
 	// OnNew, when set, is called from the ingest loop for every newly
 	// stored name, just before the surrounding batch commits. A crash
@@ -89,7 +90,7 @@ const (
 // maxDedupCache bounds how many records the ingest loop keeps in memory
 // across flushes. Beyond it the maps are dropped and the next lookup for
 // those keys falls back to a database Get.
-const maxDedupCache = 1 << 20
+const maxDedupCache = 1 << 17
 
 // Options tunes the embedded Pebble instance.
 type Options struct {
@@ -368,6 +369,18 @@ func (s *Store) AdvanceWatermark(logID string, n int64) error {
 	return s.sendOp(ingestOp{logID: logID, wm: n})
 }
 
+func (s *Store) beginRead() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return errStoreClosed
+	}
+	s.readers.Add(1)
+	return nil
+}
+
+func (s *Store) endRead() { s.readers.Done() }
+
 // DefaultScanLimit caps how many results Scan will buffer for a single
 // query. Popular apexes can have millions of records; without a cap one
 // request can exhaust memory.
@@ -385,6 +398,10 @@ func (s *Store) Scan(apex string, limit int) ([]Result, error) {
 	if limit <= 0 {
 		limit = DefaultScanLimit
 	}
+	if err := s.beginRead(); err != nil {
+		return nil, err
+	}
+	defer s.endRead()
 	lo := []byte(recordKey(apex, ""))
 	hi := make([]byte, len(apex)+1)
 	copy(hi, apex)
@@ -428,6 +445,10 @@ func (s *Store) ScanAfter(apex string, after uint64, limit int) (rows []Result, 
 	if limit <= 0 {
 		limit = DefaultScanLimit
 	}
+	if err := s.beginRead(); err != nil {
+		return nil, 0, false, err
+	}
+	defer s.endRead()
 	lo := []byte(recordKey(apex, ""))
 	hi := make([]byte, len(apex)+1)
 	copy(hi, apex)
@@ -504,6 +525,10 @@ func (h *countHeap) Push(x any)        { *h = append(*h, x.(ApexCount)) }
 func (h *countHeap) Pop() any          { old := *h; n := len(old); x := old[n-1]; *h = old[:n-1]; return x }
 
 func (s *Store) top(n, maxIter int) ([]ApexCount, error) {
+	if err := s.beginRead(); err != nil {
+		return nil, err
+	}
+	defer s.endRead()
 	lo := []byte{pfxCount}
 	hi := []byte{pfxCount + 1}
 	it, err := s.db.NewIter(&pebble.IterOptions{LowerBound: lo, UpperBound: hi})
@@ -569,6 +594,7 @@ func (s *Store) Close() error {
 	s.mu.Unlock()
 	close(s.quit)
 	<-s.done
+	s.readers.Wait()
 	return s.db.Close()
 }
 

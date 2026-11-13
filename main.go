@@ -233,10 +233,10 @@ func cmdTail(args []string) error {
 func runTailers(ctx context.Context, st *store.Store, c *commonConfig, drain bool) {
 	t := &tailer.Tailer{Store: st, Interval: c.interval, Window: c.window, Drain: drain, HeadStart: c.headStart, BatchDelay: c.batchDelay}
 	for {
-		logs, err := loglist.FetchAll(ctx, nil)
+		logs, complete, err := loglist.FetchAll(ctx, nil)
 		if err == nil {
-			t.Sync(ctx, logs)
-			log.Printf("loglist sync: %d logs known", len(logs))
+			t.Sync(ctx, logs, complete)
+			log.Printf("loglist sync: %d logs known (complete=%v)", len(logs), complete)
 		} else {
 			log.Printf("loglist fetch failed: %v", err)
 		}

@@ -39,36 +39,53 @@ func TestLimiterBucketsBounded(t *testing.T) {
 	}
 }
 
-func TestLimiterFullShardFailsClosed(t *testing.T) {
-	l := &Limiter{limit: 10, window: time.Hour, maxBuckets: 1}
+func TestLimiterFullShardEvictsLRU(t *testing.T) {
+	l := &Limiter{limit: 10, window: time.Hour, maxBuckets: 2}
 	for i := range l.shards {
-		l.shards[i].buckets = make(map[string][]time.Time)
+		l.shards[i].buckets = make(map[string]*bucket)
 	}
 	first := "client-a"
-	peer := ""
-	for i := 0; i < 10000 && peer == ""; i++ {
-		if k := fmt.Sprintf("k%d", i); shardIndex(k) == shardIndex(first) && k != first {
-			peer = k
+	var stale, peer string
+	for i := 0; i < 100000 && (stale == "" || peer == ""); i++ {
+		k := fmt.Sprintf("k%d", i)
+		if shardIndex(k) != shardIndex(first) || k == first {
+			continue
 		}
+		if stale == "" {
+			stale = k
+			continue
+		}
+		peer = k
 	}
-	if peer == "" {
-		t.Fatal("no key found hashing to the same shard")
+	if stale == "" || peer == "" {
+		t.Fatal("not enough keys hashing to the same shard")
 	}
 
 	if _, ok, _ := l.Allow(first); !ok {
 		t.Fatal("first key should be admitted")
 	}
-	// Shard is full (maxBuckets=1). The unknown peer key must be denied
-	// rather than evicting the live bucket, which would reset first's
-	// counter.
-	_, ok, retry := l.Allow(peer)
-	if ok {
-		t.Fatal("unknown key should be denied when shard is full")
+	if _, ok, _ := l.Allow(stale); !ok {
+		t.Fatal("stale key should be admitted")
 	}
-	if retry <= 0 {
-		t.Fatalf("retryAfter = %v; want > 0", retry)
+	// first is now the most recently used; stale is the LRU.
+	if rem, ok, _ := l.Allow(first); !ok || rem != 8 {
+		t.Fatalf("first second allow remaining=%d ok=%v; want 8, true", rem, ok)
 	}
-	if _, ok, _ := l.Allow(first); !ok {
-		t.Fatal("existing key's bucket must survive peer admission attempts")
+	if _, ok, _ := l.Allow(peer); !ok {
+		t.Fatal("peer should be admitted by evicting the LRU key")
+	}
+	rem, ok, _ := l.Allow(first)
+	if !ok {
+		t.Fatal("recently used first key must survive LRU eviction")
+	}
+	if rem != 7 {
+		t.Fatalf("first remaining = %d, want 7 (bucket was reset if it was evicted)", rem)
+	}
+	rem, ok, _ = l.Allow(stale)
+	if !ok {
+		t.Fatal("evicted stale key should be re-admitted as a fresh bucket")
+	}
+	if rem != 9 {
+		t.Fatalf("re-admitted stale remaining = %d, want 9", rem)
 	}
 }

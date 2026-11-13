@@ -16,6 +16,9 @@ import (
 // maxActiveFeeds bounds memory across concurrent SSE streams.
 const maxActiveFeeds = 128
 
+// maxFeedsPerKey stops one client from occupying every live-feed slot.
+const maxFeedsPerKey = 4
+
 // FeedEvent is one newly stored name, fanned out to live subscribers.
 type FeedEvent struct {
 	Apex      string
@@ -105,9 +108,6 @@ type feedLine struct {
 // newly collected names for that apex. Opening a stream consumes one
 // unit of the caller's rate budget; heartbeats keep proxies idle.
 func (s *Server) handleFeed(w http.ResponseWriter, r *http.Request) {
-	if !s.gate(w, r) {
-		return
-	}
 	if r.Method != http.MethodGet {
 		s.methodNotAllowed(w)
 		return
@@ -131,12 +131,39 @@ func (s *Server) handleFeed(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid apex: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	// Reserve feed slots before charging the rate limiter so a client
+	// already at the cap does not burn a token on every 503.
 	if n := s.activeFeeds.Add(1); n > maxActiveFeeds {
 		s.activeFeeds.Add(-1)
 		http.Error(w, "too many live feeds", http.StatusServiceUnavailable)
 		return
 	}
 	defer s.activeFeeds.Add(-1)
+
+	key := ClientKey(r, s.TrustedHops)
+	s.feedMu.Lock()
+	if s.feedsByKey == nil {
+		s.feedsByKey = make(map[string]int)
+	}
+	if s.feedsByKey[key] >= maxFeedsPerKey {
+		s.feedMu.Unlock()
+		http.Error(w, "too many live feeds from this client", http.StatusServiceUnavailable)
+		return
+	}
+	s.feedsByKey[key]++
+	s.feedMu.Unlock()
+	defer func() {
+		s.feedMu.Lock()
+		s.feedsByKey[key]--
+		if s.feedsByKey[key] <= 0 {
+			delete(s.feedsByKey, key)
+		}
+		s.feedMu.Unlock()
+	}()
+
+	if !s.gate(w, r) {
+		return
+	}
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -148,6 +175,19 @@ func (s *Server) handleFeed(w http.ResponseWriter, r *http.Request) {
 	h.Set("Content-Type", "text/event-stream")
 	h.Set("Cache-Control", "no-cache")
 	h.Set("X-Accel-Buffering", "no")
+
+	// The server-wide ReadTimeout and WriteTimeout would otherwise kill
+	// this stream early: WriteTimeout on the next heartbeat, and
+	// ReadTimeout by cancelling r.Context() once the leftover body read
+	// expires. Clearing both keeps a single connection open and stops
+	// reconnects from burning the caller's rate budget.
+	rc := http.NewResponseController(w)
+	if err := rc.SetWriteDeadline(time.Time{}); err != nil {
+		log.Printf("feed: clear write deadline: %v", err)
+	}
+	if err := rc.SetReadDeadline(time.Time{}); err != nil {
+		log.Printf("feed: clear read deadline: %v", err)
+	}
 
 	id, sub := s.Hub.Subscribe(a)
 	defer s.Hub.Unsubscribe(id)
@@ -187,6 +227,12 @@ func (s *Server) handleFeed(w http.ResponseWriter, r *http.Request) {
 			}
 			flusher.Flush()
 		case <-heartbeat.C:
+			if sub.takeDropped() {
+				if _, err := io.WriteString(w, "event: resync\ndata: {}\n\n"); err != nil {
+					return
+				}
+				flusher.Flush()
+			}
 			if _, err := io.WriteString(w, ": ping\n\n"); err != nil {
 				return
 			}
@@ -198,11 +244,11 @@ func (s *Server) handleFeed(w http.ResponseWriter, r *http.Request) {
 // handleWatch serves GET /v1/watch?apex=X&after=N as NDJSON rows newer
 // than the cursor, for clients reconciling a dropped feed or polling.
 func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request) {
-	if !s.gate(w, r) {
-		return
-	}
 	if r.Method != http.MethodGet {
 		s.methodNotAllowed(w)
+		return
+	}
+	if !s.gate(w, r) {
 		return
 	}
 	raw := r.URL.Query().Get("apex")
